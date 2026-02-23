@@ -27,3 +27,31 @@ Install the pre-commit hooks for automatic code formatting and linting on each c
 ```bash
 pre-commit install
 ```
+
+
+## Project structure
+
+```bash
+.
+├── configs
+├── data
+│   └── inputs_processed
+│       ├── eo_data
+│       ├── gbif
+│       ├── splot
+│       ├── README.md
+│       └── trait_mapping.json
+├── notebooks
+│   └── 0-data_exploration
+│       ├── 0.1-earth_observation
+│       ├── 0.2-gbif
+│       └── 0.3-splot
+├── scripts
+├── src
+│   └── __init__.py
+├── .gitignore
+├── .pre-commit-config.yaml
+├── README.md
+├── pyproject.toml
+└── requirements.txt
+```
