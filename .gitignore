@@ -4,3 +4,6 @@
 data/**
 !data/**/
 !data/**/README.md
+
+# QGIS
+qgis/
