@@ -32,31 +32,18 @@ git clone git@github.com:dav1dclara/plant-traits-earth-v2.git
 
 ## Install miniconda
 
-```bash
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-```
+Everyone has to install miniconda. Go to your dir on the scratch, e.g., `/scratch/plant-traits-v2/dclara/` and run the following commands:
 
 ```bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 bash Miniconda3-latest-Linux-x86_64.sh
 ```
 
-Installed at `/scratch/plant-traits-v2/miniconda3`.
+In the installation process, change the miniconda installation dir to `/scratch/plant-traits-v2/dclara/miniconda3`. Then initialize and reload the bash:
 
 ```bash
-/scratch/plant-traits-v2/miniconda3/bin/conda init
-```
-
-```bash
+/scratch/plant-traits-v2/<user>/miniconda3/bin/conda init
 source ~/.bashrc
 ```
 
-Create a new env for yourself with
-
-```bash
-conda create -n <your_name>-env python=3.12
-```
-
-Change the permissions to avoid conflicts:
-```bash
-chmod 700 /scratch/plant-traits-v2/miniconda3/envs/<your_name>-env
-```
+Create a new env for yourself following the instructions in the README.md.
