@@ -1,6 +1,10 @@
 *.egg-info
+.DS_Store
 
 # Data
 data/**
 !data/**/
 !data/**/README.md
+
+# QGIS
+qgis/
