@@ -3,7 +3,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "plant-traits-earth-v2"
+name = "ptev2"
 version = "0.0.0"
 
 [tool.setuptools.packages.find]
