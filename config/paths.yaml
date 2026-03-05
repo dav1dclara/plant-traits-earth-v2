@@ -1,0 +1,7 @@
+#VODCA native resolution 22km
+#WORLDCM native resolution 1km
+#Soilgrid native resolution 250m
+#MODIS native resolution 250-500m
+#Canopy height native resolution 10m
+
+#Start with all data at 22km

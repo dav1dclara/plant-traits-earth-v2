@@ -5,3 +5,13 @@ geopandas
 numpy
 matplotlib
 rasterio
+
+hydra-core
+omegaconf
+torch
+torchvision
+scikit-learn
+torchgeo
+rioxarray
+wandb
+tqdm
