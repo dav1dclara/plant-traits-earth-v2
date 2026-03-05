@@ -30,4 +30,33 @@ You can now clone the repo to your personal folder on the scratch with:
 git clone git@github.com:dav1dclara/plant-traits-earth-v2.git
 ```
 
-## Connecting with vs code
+## Install miniconda
+
+```bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+```
+
+```bash
+bash Miniconda3-latest-Linux-x86_64.sh
+```
+
+Installed at `/scratch/plant-traits-v2/miniconda3`.
+
+```bash
+/scratch/plant-traits-v2/miniconda3/bin/conda init
+```
+
+```bash
+source ~/.bashrc
+```
+
+Create a new env for yourself with
+
+```bash
+conda create -n <your_name>-env python=3.12
+```
+
+Change the permissions to avoid conflicts:
+```bash
+chmod 700 /scratch/plant-traits-v2/miniconda3/envs/<your_name>-env
+```
