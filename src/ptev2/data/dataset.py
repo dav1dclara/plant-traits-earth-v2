@@ -1,5 +1,6 @@
-from pathlib import Path
-from torchgeo.datasets import RasterDataset
+from torch.utils.data import DataLoader
+from torchgeo.datasets import IntersectionDataset, RasterDataset
+from torchgeo.samplers import RandomGeoSampler
 
 
 class CanopyHeight(RasterDataset):
@@ -101,27 +102,15 @@ class WorldClim(RasterDataset):
 #         super().__init__(paths=paths, **kwargs)
 
 
-# TODO: write a function that combines all datasets needed for training (as specified in the training config) -> the implementation below is not correct
-def build_eo_dataset(eo_data_dir: Path):
-    # datasets = {
-    #     "CanopyHeight": CanopyHeight(paths=eo_data_dir / "canopy_height"),
-    #     "Modis": Modis(paths=eo_data_dir / "modis"),
-    #     "SoilGrids": SoilGrids(paths=eo_data_dir / "soilgrids"),
-    #     "Vodca": Vodca(paths=eo_data_dir / "vodca"),
-    #     "WorldClim": WorldClim(paths=eo_data_dir / "worldclim"),
-    # }
-
-    # for name, ds in datasets.items():
-    #     print(f"{name}: {len(ds.all_bands)} bands, {len(ds)} files, res={ds.res}, bounds={ds.bounds}")
-
-    # combined = None
-    # for ds in datasets.values():
-    #     combined = ds if combined is None else combined & ds
-    # return combined
-    pass
-
-
-# TODO: implement a dataloader
-def make_dataloader(dataset, batch_size):
-    # return DataLoader()
-    pass
+# TODO: re-implement this function - think about which sampler to use
+def make_dataloader(
+    dataset: RasterDataset | IntersectionDataset,
+    patch_size: int,
+    batch_size: int,
+    num_samples: int,
+    num_workers: int = 0,
+) -> DataLoader:
+    sampler = RandomGeoSampler(dataset, size=patch_size, length=num_samples)
+    return DataLoader(
+        dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers
+    )

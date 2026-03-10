@@ -3,7 +3,14 @@ import hydra
 from omegaconf import DictConfig
 import torch
 
-from ptev2.data.dataset import CanopyHeight, Modis, SoilGrids, Vodca, WorldClim
+from ptev2.data.dataset import (
+    CanopyHeight,
+    Modis,
+    SoilGrids,
+    Vodca,
+    WorldClim,
+    make_dataloader,
+)
 from ptev2.utils import seed_all
 
 
@@ -30,16 +37,16 @@ def train(cfg: DictConfig) -> None:
     eo_data_dir = data_dir / "22km/eo_data/"
 
     # Get data loaders
-    datasets = {
-        "CanopyHeight": CanopyHeight(paths=eo_data_dir / "canopy_height"),
-        "Modis": Modis(paths=eo_data_dir / "modis"),
-        "SoilGrids": SoilGrids(paths=eo_data_dir / "soilgrids"),
-        "Vodca": Vodca(paths=eo_data_dir / "vodca"),
-        "WorldClim": WorldClim(paths=eo_data_dir / "worldclim"),
-    }
+    canopy_height = CanopyHeight(paths=eo_data_dir / "canopy_height")
+    modis = Modis(paths=eo_data_dir / "modis")
+    soilgrids = SoilGrids(paths=eo_data_dir / "soilgrids")
+    vodca = Vodca(paths=eo_data_dir / "vodca")
+    worldclim = WorldClim(paths=eo_data_dir / "worldclim")
 
-    for name, ds in datasets.items():
-        print(f"{name}: {len(ds.all_bands)} bands, {len(ds)} files, res={ds.res}")
+    # TODO: write a function to combine the dataset to one dataset in @src/ptev2/data/dataset.py
+
+    # Create dataloader # TODO: to revise
+    dataloader = make_dataloader(canopy_height, 256, 4, 16, 0)
 
     # Get model
     # TODO import code from Luca
