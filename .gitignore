@@ -1,6 +1,8 @@
 *.egg-info
 .DS_Store
 __pycache__/
+outputs/
+wandb/
 
 # Data
 data/**
@@ -9,3 +11,6 @@ data/**
 
 # QGIS
 qgis/
+
+# Claude
+.claude/

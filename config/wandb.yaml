@@ -1,0 +1,4 @@
+wandb:
+  enabled: true
+  entity: plant-traits-v2
+  project: Project_PTV2
