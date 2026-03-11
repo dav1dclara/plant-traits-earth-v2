@@ -1,5 +1,4 @@
 defaults:
-  - paths: default
   - data: default
   - training: default
   - wandb

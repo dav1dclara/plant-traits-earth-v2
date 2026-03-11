@@ -1,6 +1,6 @@
 # Data sources
 
-This file describes the data sources used in this project.
+This file describes the data sources used in this project. The data was provided by our supervisor and is already processed.
 
 ## Location and structure
 
@@ -37,13 +37,20 @@ data/
 
 ## Earth Observation (EO) predictors
 
-EO data is available at both 1 km and 22 km resolution. Each resolution follows the same structure under `eo_data/`.
+EO data is available at both 1 km and 22 km resolution. All data is power-transformed.
+
+
+Each resolution follows the same structure under `eo_data/`.
 
 ### Canopy height
 
-**Files:** `ETH_GlobalCanopyHeight_2020_v1.tif`, `ETH_GlobalCanopyHeightSD_2020_v1.tif`
+Estimated global canopy height (`ETH_GlobalCanopyHeight_2020_v1.tif`) and uncertainty (`ETH_GlobalCanopyHeightSD_2020_v1.tif`)
 
 > **Q1:** What is the source of the canopy height data (ETH product)? What year does it represent and what is the original resolution before resampling?
+
+The canopy heights
+
+
 
 ### MODIS
 
@@ -53,6 +60,10 @@ Naming: `sur_refl_[band]_2001-2024_m[1-12]_mean.tif`
 > **Q2:** Which MODIS product(s) were used (e.g. MOD09A1, MYD09)? Were bands from Terra, Aqua, or combined? Were the monthly means computed from all years 2001–2024, or a specific subset?
 
 ### SoilGrids
+
+SoilGrids is a global gridded soil information system from ISRIC. It provides predictions of soil properties at multiple depth intervals.
+
+
 
 **Files:** 62 GeoTIFFs. 11 soil properties at 6 depth intervals (0–5, 5–15, 15–30, 30–60, 60–100, 100–200 cm).
 Properties: `bdod`, `cec`, `cfvo`, `clay`, `nitrogen`, `ocd`, `ocs`, `phh2o`, `sand`, `silt`, `soc`.

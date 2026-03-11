@@ -1,1 +1,23 @@
 # Dataset settings (trait_id, resolution, target source, ...)
+root_dir: /scratch3/plant-traits-v2/data/
+
+canopy_height:
+  path: 22km/eo_data/canopy_height
+
+modis:
+  path: 22km/eo_data/modis
+
+soilgrids:
+  path: 22km/eo_data/soilgrids
+
+vodca:
+  path: 22km/eo_data/vodca
+
+worldclim:
+  path: 22km/eo_data/worldclim
+
+gbif:
+  path: 22km/gbif
+
+splot:
+  path: 22km/splot

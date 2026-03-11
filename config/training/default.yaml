@@ -1,1 +1,29 @@
 # Training hyperparameters (epochs, lr, batch size, patch size, ...)
+
+preprocess:
+  patch_size: 64
+  stride: 64
+  batch_size: 32
+  num_workers: 4
+  output_path: chips.h5
+
+data:
+  targets:
+    source: gbif  # gbif or splot
+    trait_ids: [4]  # empty = all traits
+  predictors:
+    canopy_height:
+      use: true
+      bands: []
+    modis:
+      use: true
+      bands: []
+    soilgrids:
+      use: true
+      bands: []
+    vodca:
+      use: true
+      bands: []
+    worldclim:
+      use: true
+      bands: []
