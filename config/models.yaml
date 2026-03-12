@@ -1,42 +1,12 @@
-seed: 0
-device: "cuda"
+defaults:
+  - config
+  - _self_
 
-# Model selection: override with model_name=baseline or model_name=respatch
-model_name: "respatch"  # Options: "baseline", "respatch"
-
-# Model configurations
-models:
-  # Baseline: Padarian et al. 2019 Context CNN for Digital Soil Mapping
-  baseline:
-    _target_: ptev2.models.baseline.PadarianInspiredPatchCNN
-    in_channels: ${data.in_channels}
-    n_traits: ${data.n_traits}
-    hidden_dim: 64
-    dropout_p: 0.3
-    head_type: "single"   # "single" (recommended) or "multi"
-
-  # Advanced: ResNet-style Patch CNN (PlantTraits.Earth v2 baseline)
-  respatch:
-    _target_: ptev2.models.traitPatchCNN.ResPatchCenterCNN
-    in_channels: ${data.in_channels}
-    n_traits: ${data.n_traits}
-    base_channels: 32
-    norm: "gn"  # GroupNorm (more stable than BatchNorm for small batches)
-    gn_groups: 8
-    stride_blocks: [1, 2, 1, 2]  # Downsample in blocks 2 and 4
-    dropout_p: 0.1
-    use_residual: true
-
-# Select active model based on model_name
-model: ${models.${model_name}}
-
-data:
-  in_channels: 50  # 50 predictors (or 54 with optional trig lat/lon encodings)
-  patch_h: 25      # Patch size: 25x25 (~330x330 km at 22km resolution)
-  patch_w: 25      # Can be increased to 25 for more context if stable
-  batch_size: 8
-  n_traits: 31
-
+# Backward-compatible aliases for older scripts that still read models.yaml directly.
+seed: ${training.seed}
+device: ${training.device}
+model_name: ${models.name}
+model: ${models.active}
 optim:
-  lr: 1e-3
-  weight_decay: 1e-4
+  lr: ${training.optimizer.lr}
+  weight_decay: ${training.optimizer.weight_decay}

@@ -1,6 +1,7 @@
 defaults:
   - paths: default
   - data: default
+  - models: default
   - training: default
-  - wandb
+  - wandb: default
   - _self_

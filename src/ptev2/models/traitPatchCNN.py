@@ -134,6 +134,13 @@ class ResPatchCenterCNN(nn.Module):
         dropout_p: float = 0.0,
     ) -> None:
         super().__init__()
+        if len(stride_blocks) != 4:
+            raise ValueError(
+                f"stride_blocks must have 4 entries, got {len(stride_blocks)}."
+            )
+        if any(s < 1 for s in stride_blocks):
+            raise ValueError(f"All stride values must be >= 1, got {stride_blocks}.")
+        stride_blocks = tuple(int(s) for s in stride_blocks)
 
         c1 = base_channels
         c2 = base_channels * 2

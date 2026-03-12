@@ -1,1 +1,31 @@
-# Dataset settings (trait_id, resolution, target source, ...)
+in_channels: 150  # eo_data_processed predictors currently available (2 + 72 + 61 + 9 + 6)
+n_traits: 37
+patch_h: 25
+patch_w: 25
+batch_size: 8
+
+trait_pattern: "X*.tif"
+split_parquet_pattern: "X*_mean.parquet"
+
+sources:
+  eo_processed_dir: ${paths.data_root_dir}/22km/eo_data_processed
+  merged_targets_dir: ${paths.data_root_dir}/22km/merged
+  source_mask_dir: ${paths.data_root_dir}/22km/merged/source_mask
+  gbif_targets_dir: ${paths.data_root_dir}/22km/gbif
+  splot_targets_dir: ${paths.data_root_dir}/22km/splot
+  skcv_splits_dir: ${paths.data_root_dir}/22km/skcv_splits
+  esa_worldcover_water_mask: null  # Set to a raster path once available.
+
+splits:
+  n_folds: 5
+  train_folds: [0, 1, 2]
+  val_fold: 3
+  test_fold: 4
+  fold_column_candidates: ["fold", "cv_fold", "split_fold"]
+  h3_column_candidates: ["h3_index", "h3", "h3_cell", "hex_id"]
+
+source_mask_encoding:
+  no_data: 0
+  cit: 1
+  sci: 2
+  raster_nodata: 255

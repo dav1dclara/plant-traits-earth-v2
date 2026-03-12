@@ -1,1 +1,16 @@
-# Training hyperparameters (epochs, lr, batch size, patch size, ...)
+seed: 0
+device: "cuda"
+epochs: 10
+
+loss:
+  _target_: torch.nn.MSELoss
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1e-3
+  weight_decay: 1e-4
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.StepLR
+  step_size: 5
+  gamma: 0.5
