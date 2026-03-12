@@ -1,7 +1,13 @@
+"""
+This file is OUTDATED.
+"""
+
 from pathlib import Path
 
 from omegaconf import DictConfig
 from torchgeo.datasets import IntersectionDataset, RasterDataset
+
+from functools import reduce
 
 TRAIT_IDS = (
     4,
@@ -144,7 +150,7 @@ class SplotTraits(RasterDataset):
     is_image = True
 
 
-def _validate_datasets(datasets: dict) -> None:
+def _validate_datasets(datasets: dict) -> None:  # TODO: might need more checks here
     """Validate CRS and resolution consistency across datasets."""
     ref_name, ref = next(iter(datasets.items()))
     for name, ds in datasets.items():
@@ -191,10 +197,9 @@ def create_predictors_dataset(cfg: DictConfig) -> RasterDataset | IntersectionDa
 
     _validate_datasets(datasets)
 
+    # Combine datasets
     dataset_list = list(datasets.values())
-    combined = dataset_list[0]
-    for ds in dataset_list[1:]:
-        combined = combined & ds
+    combined = reduce(lambda a, b: a | b, dataset_list)
 
     return combined
 
@@ -226,13 +231,13 @@ def create_dataset(cfg: DictConfig) -> IntersectionDataset:
 
     combined = predictors & targets
 
-    all_bands = _collect_bands(combined)
-    print(f"\nCombined dataset: {len(all_bands)} bands total")
-    print(
-        f"  - Predictor bands ({len(_collect_bands(predictors))}): {_collect_bands(predictors)}"
-    )
-    print(
-        f"  - Target bands   ({len(_collect_bands(targets))}): {_collect_bands(targets)}"
-    )
+    # all_bands = _collect_bands(combined)
+    # print(f"\nCombined dataset: {len(all_bands)} bands total")
+    # print(
+    #     f"  - Predictor bands ({len(_collect_bands(predictors))}): {_collect_bands(predictors)}"
+    # )
+    # print(
+    #     f"  - Target bands   ({len(_collect_bands(targets))}): {_collect_bands(targets)}"
+    # )
 
     return combined

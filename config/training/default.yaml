@@ -1,13 +1,10 @@
-# Training hyperparameters (epochs, lr, batch size, patch size, ...)
+# Training hyperparameters (epochs, lr, batch size, ...)
 
-preprocess:
-  patch_size: 64
-  stride: 64
-  batch_size: 32
-  num_workers: 4
-  output_path: chips.h5
+batch_size: 32
+num_workers: 4
 
 data:
+  res: 22
   targets:
     source: gbif  # gbif or splot
     trait_ids: [4]  # empty = all traits
@@ -27,3 +24,8 @@ data:
     worldclim:
       use: true
       bands: []
+
+
+data_loaders:
+  batch_size: 32
+  num_workers: 4

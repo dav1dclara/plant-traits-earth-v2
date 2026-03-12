@@ -5,7 +5,7 @@ geopandas
 numpy
 matplotlib
 rasterio
-
+zarr
 hydra-core
 omegaconf
 torch

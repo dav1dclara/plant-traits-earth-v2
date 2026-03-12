@@ -2,8 +2,10 @@ import hydra
 import torch
 from omegaconf import DictConfig
 
-from ptev2.data.dataset import create_predictors_dataset, create_targets_dataset
+from pathlib import Path
+
 from ptev2.utils import seed_all
+from ptev2.data.dataloader import get_train_dataloader, get_val_dataloader
 
 
 def train(cfg: DictConfig) -> None:
@@ -12,7 +14,7 @@ def train(cfg: DictConfig) -> None:
 
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"Using device: {device}\n")
 
     # # wandb
     # if cfg.wandb.enabled:
@@ -24,13 +26,31 @@ def train(cfg: DictConfig) -> None:
     # else:
     #     print("W&B logging disabled.")
 
-    # Instantiate EO datasets
-    targets_datasets = create_targets_dataset(cfg)
-    predictors_datasets = create_predictors_dataset(
-        cfg
-    )  # TODO: bug in intersecting datasets
+    # Get data loaders
+    # Later, specify the data properties in the training config and
+    res = cfg.training.data.res
+    targets = cfg.training.data.targets
+    predictors = cfg.training.data.predictors
+    targets = cfg.training.data.targets
 
-    # # TODO: write a function to combine the dataset to one dataset in @src/ptev2/data/dataset.py
+    print("--- DATA PROPERTIES ---")
+    print(f"Resolution:\n  - {res} km")
+    print("Predictors:")
+    for name, predictor in predictors.items():
+        print(f"  - {name}")
+    print(f"Targets:\n  - {targets.source}")
+    # TODO: print traits
+
+    print()
+
+    print("--- DATA LOADERS ---")
+    data_loader_cfg = cfg.training.data_loaders
+    batch_size = data_loader_cfg.batch_size
+    zarr_path = Path(f"/scratch3/plant-traits-v2/data/chips/{res}km/")
+
+    # TODO: to implement
+    get_train_dataloader(zarr_path, batch_size)
+    get_val_dataloader(zarr_path, batch_size)
 
     # # Get model
     # # TODO import code from Luca
