@@ -32,8 +32,8 @@ model: ${models.${model_name}}
 
 data:
   in_channels: 50  # 50 predictors (or 54 with optional trig lat/lon encodings)
-  patch_h: 15      # Patch size: 15x15 (~330x330 km at 22km resolution)
-  patch_w: 15      # Can be increased to 25 for more context if stable
+  patch_h: 25      # Patch size: 25x25 (~330x330 km at 22km resolution)
+  patch_w: 25      # Can be increased to 25 for more context if stable
   batch_size: 8
   n_traits: 31
 

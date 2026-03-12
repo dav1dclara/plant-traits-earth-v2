@@ -1,26 +1,9 @@
-# ptev2/models/traitPatchCNN.py (FCN-style ResNet patch CNN for center-pixel regression)
-# ResNet-style (4-block) patch CNN for center-pixel regression at 22 km (and transferable to other resolutions).
-#
-# Based on the patch-based protocol from Sialelli et al. (2025) and Padarian et al. (2019),
-# adapted for multi-task plant trait prediction.
-#
-# Key properties (matching PlantTraits.Earth v2 specs):
-# - Patch-based learning: input is (B, C, k, k), k=15 or 25
-# - Optional lat/lon trig encodings are handled by simply increasing in_channels (+4) in the DATA pipeline
-# - Encoder: 4 conv blocks, 3x3 conv + Norm + ReLU; strided conv in every other block (blocks 2 and 4 by default)
-# - Head: 1x1 conv producing 31 outputs; we take ONLY the center pixel (center-pixel regression)
-# - Lightweight residual connections where shapes match
-#
-# This is intentionally simple/stable and avoids any dense decoder, since global context
-# is already provided by the input patch, and center-pixel supervision is substantially cheaper.
-
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def _make_norm(
@@ -28,70 +11,116 @@ def _make_norm(
     num_channels: int,
     gn_groups: int = 8,
 ) -> nn.Module:
+    """Create normalization layer."""
     if norm == "bn":
         return nn.BatchNorm2d(num_channels)
+
     if norm == "gn":
-        # Ensure groups divide channels
+        # Ensure the number of groups divides num_channels
         g = min(gn_groups, num_channels)
-        while num_channels % g != 0 and g > 1:
+        while g > 1 and num_channels % g != 0:
             g -= 1
         return nn.GroupNorm(g, num_channels)
+
     if norm == "none":
         return nn.Identity()
+
     raise ValueError(f"Unknown norm='{norm}'")
 
 
-class ConvBlock(nn.Module):
+class ResidualBlock(nn.Module):
     """
-    A single conv block:
-      Conv2d(3x3, stride) -> Norm -> ReLU
+    Basic residual block with two 3x3 convolutions.
+
+    Main path:
+        Conv3x3 -> Norm -> ReLU -> Dropout -> Conv3x3 -> Norm
+
+    Skip path:
+        Identity, or 1x1 projection if spatial size / channel count changes
+
+    Output:
+        ReLU(main + skip)
     """
 
     def __init__(
         self,
-        in_ch: int,
-        out_ch: int,
+        in_channels: int,
+        out_channels: int,
         stride: int = 1,
         norm: Literal["bn", "gn", "none"] = "gn",
         gn_groups: int = 8,
         dropout_p: float = 0.0,
-    ):
+    ) -> None:
         super().__init__()
-        self.conv = nn.Conv2d(
-            in_ch, out_ch, kernel_size=3, stride=stride, padding=1, bias=False
+
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
         )
-        self.norm = _make_norm(norm, out_ch, gn_groups=gn_groups)
-        self.act = nn.ReLU(inplace=True)
-        self.drop = nn.Dropout2d(p=dropout_p) if dropout_p > 0 else nn.Identity()
+        self.norm1 = _make_norm(norm, out_channels, gn_groups=gn_groups)
+        self.act1 = nn.ReLU(inplace=True)
+        self.drop = nn.Dropout2d(dropout_p) if dropout_p > 0 else nn.Identity()
+
+        self.conv2 = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.norm2 = _make_norm(norm, out_channels, gn_groups=gn_groups)
+
+        if stride != 1 or in_channels != out_channels:
+            self.skip = nn.Sequential(
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                _make_norm(norm, out_channels, gn_groups=gn_groups),
+            )
+        else:
+            self.skip = nn.Identity()
+
+        self.act_out = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv(x)
-        x = self.norm(x)
-        x = self.act(x)
-        x = self.drop(x)
-        return x
+        identity = self.skip(x)
+
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.act1(out)
+        out = self.drop(out)
+
+        out = self.conv2(out)
+        out = self.norm2(out)
+
+        out = out + identity
+        out = self.act_out(out)
+        return out
 
 
 class ResPatchCenterCNN(nn.Module):
     """
-    Minimal ResNet-style encoder (4 conv blocks) + 1x1 head,
-    predicting only the CENTER pixel trait vector.
+    Patch-based residual CNN for center-cell multi-trait regression.
 
-    This model provides a baseline for patch-based multi-task regression,
-    leveraging spatial context while maintaining computational efficiency.
+    Intended use:
+        - Input:  raster patch of shape (B, C, H, W)
+        - Output: trait vector for the center cell, shape (B, n_traits)
 
-    Args:
-        in_channels: Number of input channels (e.g., 50 predictors, or 54 with trig encodings)
-        n_traits: Number of output traits (default: 31)
-        base_channels: Base number of channels in first conv block (default: 32)
-        norm: Normalization type - 'bn' (BatchNorm), 'gn' (GroupNorm), or 'none'
-        gn_groups: Number of groups for GroupNorm (default: 8)
-        stride_blocks: Stride pattern for 4 blocks (default: (1, 2, 1, 2) for downsampling in blocks 2 and 4)
-        dropout_p: Dropout probability (default: 0.0)
-        use_residual: Whether to add residual connections where shapes match (default: True)
-
-    Input:  x shape (B, C, k, k)  where k is odd (e.g., 15 or 25 recommended)
-    Output: y shape (B, n_traits)
+    Notes:
+        - Input patch size must be odd (e.g. 15x15 or 25x25)
+        - Output feature map size must also remain odd so the center location
+          is well-defined
+        - For 15x15 patches, a safe default is stride_blocks=(1, 1, 1, 1)
+        - For 25x25 patches, stride_blocks=(1, 2, 1, 2) is also valid
     """
 
     def __init__(
@@ -101,125 +130,120 @@ class ResPatchCenterCNN(nn.Module):
         base_channels: int = 32,
         norm: Literal["bn", "gn", "none"] = "gn",
         gn_groups: int = 8,
-        # Stride pattern "every other block":
-        # block2 and block4 downsample by 2 -> total downsample factor 4
-        stride_blocks: tuple[int, int, int, int] = (1, 2, 1, 2),
+        stride_blocks: tuple[int, int, int, int] = (1, 1, 1, 1),
         dropout_p: float = 0.0,
-        # If True, add lightweight residual connections where shapes match
-        use_residual: bool = True,
-    ):
+    ) -> None:
         super().__init__()
 
         c1 = base_channels
         c2 = base_channels * 2
         c3 = base_channels * 4
 
-        # 4 conv blocks (small ResNet-style CNN)
-        # Channel schedule: C -> c1 -> c1 -> c2 -> c3 (simple widening with depth)
-        self.b1 = ConvBlock(
-            in_channels,
-            c1,
+        # Four-stage residual encoder
+        self.block1 = ResidualBlock(
+            in_channels=in_channels,
+            out_channels=c1,
             stride=stride_blocks[0],
             norm=norm,
             gn_groups=gn_groups,
             dropout_p=dropout_p,
         )
-        self.b2 = ConvBlock(
-            c1,
-            c1,
+        self.block2 = ResidualBlock(
+            in_channels=c1,
+            out_channels=c1,
             stride=stride_blocks[1],
             norm=norm,
             gn_groups=gn_groups,
             dropout_p=dropout_p,
         )
-        self.b3 = ConvBlock(
-            c1,
-            c2,
+        self.block3 = ResidualBlock(
+            in_channels=c1,
+            out_channels=c2,
             stride=stride_blocks[2],
             norm=norm,
             gn_groups=gn_groups,
             dropout_p=dropout_p,
         )
-        self.b4 = ConvBlock(
-            c2,
-            c3,
+        self.block4 = ResidualBlock(
+            in_channels=c2,
+            out_channels=c3,
             stride=stride_blocks[3],
             norm=norm,
             gn_groups=gn_groups,
             dropout_p=dropout_p,
         )
 
-        self.use_residual = use_residual
-
-        # 1x1 conv head produces per-pixel trait logits; we will take only center pixel.
+        # Per-pixel trait prediction map; center cell is extracted in forward()
         self.head = nn.Conv2d(c3, n_traits, kernel_size=1, bias=True)
 
+        self.in_channels = in_channels
+        self.n_traits = n_traits
+        self.base_channels = base_channels
+        self.norm = norm
+        self.gn_groups = gn_groups
+        self.stride_blocks = stride_blocks
+        self.dropout_p = dropout_p
+
     @staticmethod
-    def _center_index(h: int, w: int) -> tuple[int, int]:
-        return h // 2, w // 2
+    def _center_index(height: int, width: int) -> tuple[int, int]:
+        """Return the unique center index of an odd-sized spatial map."""
+        if height % 2 == 0 or width % 2 == 0:
+            raise ValueError(
+                "Output feature map must have odd spatial dimensions for true "
+                f"center-cell prediction, got H={height}, W={width}."
+            )
+        return height // 2, width // 2
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x: (B, C, k, k)
-        returns: (B, n_traits)
+        Args:
+            x: Tensor of shape (B, C, H, W), with odd H and W
+
+        Returns:
+            Tensor of shape (B, n_traits)
         """
         if x.ndim != 4:
-            raise ValueError(f"Expected x to be (B,C,H,W), got {tuple(x.shape)}")
-        _, _, H, W = x.shape
-        if (H % 2) == 0 or (W % 2) == 0:
             raise ValueError(
-                f"Patch size should be odd (e.g., 15 or 25). Got H={H}, W={W}"
+                f"Expected input of shape (B, C, H, W), got {tuple(x.shape)}"
             )
 
-        # Encoder
-        z1 = self.b1(x)
+        _, _, height, width = x.shape
+        if height % 2 == 0 or width % 2 == 0:
+            raise ValueError(
+                f"Input patch size must be odd, got H={height}, W={width}."
+            )
 
-        z2 = self.b2(z1)
-        if self.use_residual and z2.shape == z1.shape:
-            z2 = z2 + z1  # tiny ResNet-style skip when shape matches
+        z = self.block1(x)
+        z = self.block2(z)
+        z = self.block3(z)
+        z = self.block4(z)
 
-        z3 = self.b3(z2)
+        y_map = self.head(z)  # (B, n_traits, H_out, W_out)
 
-        z4 = self.b4(z3)
-        if self.use_residual and z4.shape == z3.shape:
-            z4 = z4 + z3
+        _, _, out_h, out_w = y_map.shape
+        ci, cj = self._center_index(out_h, out_w)
 
-        # Head (per-pixel), then pick center pixel only
-        y_map = self.head(z4)  # (B, n_traits, H', W')
-        _, _, Hp, Wp = y_map.shape
-        ci, cj = self._center_index(Hp, Wp)
-
+        # Extract trait vector for the center cell only
         y_center = y_map[:, :, ci, cj]  # (B, n_traits)
         return y_center
 
 
-# ----------------------------
-# Optional: masked loss (keep in training.py if you prefer)
-# ----------------------------
-def masked_mse_loss(
-    y_pred: torch.Tensor,
-    y_true: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """
-    y_pred, y_true: (B, T)
-    mask: (B, T), 1=observed, 0=missing
-    """
-    if mask is None:
-        return F.mse_loss(y_pred, y_true)
-    mask = mask.float()
-    se = (y_pred - y_true) ** 2
-    se = se * mask
-    return se.sum() / mask.sum().clamp_min(eps)
-
-
 if __name__ == "__main__":
-    # quick sanity check
     torch.manual_seed(0)
+
     model = ResPatchCenterCNN(
-        in_channels=54, n_traits=31, base_channels=32, norm="gn", dropout_p=0.1
+        in_channels=54,
+        n_traits=31,
+        base_channels=32,
+        norm="gn",
+        gn_groups=8,
+        stride_blocks=(1, 1, 1, 1),  # safe for 15x15 patches
+        # For 25x25 patches, can also use stride_blocks=(1, 2, 1, 2) for more downsampling
+        dropout_p=0.1,
     )
-    x = torch.randn(8, 54, 15, 15)  # 50 predictors + 4 trig coord channels = 54
+
+    x = torch.randn(8, 54, 15, 15)
     y = model(x)
-    print(y.shape)  # torch.Size([8, 31])
+
+    print(model)
+    print("Output shape:", y.shape)
