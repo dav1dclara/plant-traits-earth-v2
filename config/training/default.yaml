@@ -1,8 +1,4 @@
 # Training hyperparameters (epochs, lr, batch size, ...)
-
-batch_size: 32
-num_workers: 4
-
 data:
   res: 22
   targets:
@@ -13,7 +9,7 @@ data:
       use: true
       bands: []
     modis:
-      use: true
+      use: false
       bands: []
     soilgrids:
       use: true
@@ -24,7 +20,6 @@ data:
     worldclim:
       use: true
       bands: []
-
 
 data_loaders:
   batch_size: 32

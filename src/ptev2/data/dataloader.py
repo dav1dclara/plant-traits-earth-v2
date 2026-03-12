@@ -4,20 +4,35 @@ from pathlib import Path
 
 import torch
 import zarr
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 
-class ChipDataset(Dataset):
+class PlantTraitDataset(Dataset):
+    """PyTorch Dataset for spatially pre-extracted Earth Observation chips paired with plant trait observations.
+
+    Each sample corresponds to one field observation location. The zarr store is expected to contain
+    one array per predictor (e.g. 'canopy_height', 'modis', 'worldclim') and one array for the target
+    trait (e.g. 'gbif'). All predictor arrays are concatenated along the channel dimension (dim=0)
+    to form a single input tensor X, while the target array provides the label tensor y.
+
+    Args:
+        zarr_path: Path to the zarr group store containing predictor and target arrays.
+        predictors: List of array names in the store to use as model inputs.
+        target: Name of the array in the store to use as the prediction target.
+    """
+
     def __init__(self, zarr_path: str | Path, predictors: list[str], target: str):
         self.store = zarr.open_group(str(zarr_path), mode="r")
         self.predictors = predictors
         self.target = target
-        self.n_samples = self.store[predictors[0]].shape[0]
+        self.n_chips = self.store[predictors[0]].shape[0]
 
     def __len__(self) -> int:
-        return self.n_samples
+        return self.n_chips
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(
+        self, idx: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:  # TODO check this
         X = torch.cat(
             [torch.as_tensor(self.store[name][idx]) for name in self.predictors], dim=0
         )
@@ -25,41 +40,35 @@ class ChipDataset(Dataset):
         return X, y
 
 
-def get_dataloader(zarr_path):
-    # TODO: create dataset
+def get_dataloader(
+    zarr_dir: Path,
+    split: str,
+    predictors: list[str],
+    target: str,
+    batch_size: int,
+    num_workers: int,
+) -> DataLoader:
+    """Get a dataloader for a given split from a zarr chip store.
 
-    # TODO: remove this later, only used for testing
-    store = zarr.open_group(str(zarr_path), mode="r")
-
-    for name, arr in store.arrays():
-        print(f"  {name}: shape={arr.shape}, dtype={arr.dtype}, chunks={arr.chunks}")
-
-    print("\nAttributes:")
-    for k, v in store.attrs.items():
-        print(f"  {k}: {v}")
-
-    print(f"Arrays: {list(store.keys())}\n")
-
-
-def get_train_dataloader(zarr_path, batch_size):
-    """Get train dataloader from zarr chip store."""
-    assert (zarr_path / "train.zarr").exists(), (
-        f"Train zarr store not found at {zarr_path / 'train.zarr'}"
+    Args:
+        zarr_dir: Directory containing the split zarr stores (train.zarr, val.zarr, test.zarr).
+        split: One of 'train', 'val', or 'test'.
+        predictors: List of array names in the store to use as model inputs.
+        target: Name of the array in the store to use as the prediction target.
+        batch_size: Number of samples per batch.
+        num_workers: Number of worker processes to use for data loading.
+    """
+    assert split in ["train", "val", "test"], (
+        f"split must be one of ['train', 'val', 'test'], got '{split}'"
     )
-    print(f"Getting train data loader from {zarr_path}...")
+    zarr_path = zarr_dir / f"{split}.zarr"
+    assert zarr_path.exists(), f"{split} zarr store not found at {zarr_path}"
 
+    dataset = PlantTraitDataset(zarr_path, predictors=predictors, target=target)
 
-def get_val_dataloader(zarr_path, batch_size):
-    """Get validation dataloader from zarr chip store."""
-    assert (zarr_path / "val.zarr").exists(), (
-        f"Val zarr store not found at {zarr_path / 'val.zarr'}"
+    shuffle = True if split == "train" else False
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers
     )
-    print(f"Getting val data loader from {zarr_path}...")
 
-
-def get_test_dataloader(zarr_path, batch_size):
-    """Get test dataloader from zarr chip store."""
-    assert (zarr_path / "test.zarr").exists(), (
-        f"Test zarr store not found at {zarr_path / 'test.zarr'}"
-    )
-    print(f"Getting test data loader from {zarr_path}...")
+    return dataloader

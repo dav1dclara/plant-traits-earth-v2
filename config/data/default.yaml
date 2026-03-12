@@ -1,6 +1,5 @@
 # Dataset settings (trait_id, resolution, target source, ...)
 root_dir: /scratch3/plant-traits-v2/data/
-zarr_path: /scratch3/plant-traits-v2/data/chips/chips_22km.zarr
 
 canopy_height:
   path: 22km/eo_data/canopy_height

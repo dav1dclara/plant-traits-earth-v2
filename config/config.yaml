@@ -1,5 +1,6 @@
 defaults:
   - data: default
+  - chipping: default
   - training: default
   - wandb
   - _self_

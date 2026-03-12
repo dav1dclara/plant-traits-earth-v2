@@ -5,7 +5,7 @@ from omegaconf import DictConfig
 from pathlib import Path
 
 from ptev2.utils import seed_all
-from ptev2.data.dataloader import get_train_dataloader, get_val_dataloader
+from ptev2.data.dataloader import get_dataloader
 
 
 def train(cfg: DictConfig) -> None:
@@ -16,7 +16,7 @@ def train(cfg: DictConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}\n")
 
-    # # wandb
+    # # wandb - Just uncomment to enable
     # if cfg.wandb.enabled:
     #     run = wandb.init(
     #         entity=cfg.wandb.entity,
@@ -26,40 +26,62 @@ def train(cfg: DictConfig) -> None:
     # else:
     #     print("W&B logging disabled.")
 
-    # Get data loaders
-    # Later, specify the data properties in the training config and
-    res = cfg.training.data.res
-    targets = cfg.training.data.targets
-    predictors = cfg.training.data.predictors
-    targets = cfg.training.data.targets
-
+    # Get data configuration for training
     print("--- DATA PROPERTIES ---")
-    print(f"Resolution:\n  - {res} km")
-    print("Predictors:")
-    for name, predictor in predictors.items():
+    training_data_cfg = cfg.training.data
+    res = training_data_cfg.res
+    targets = training_data_cfg.targets.source
+    predictors = training_data_cfg.predictors
+    used_predictors = [name for name, cfg in predictors.items() if cfg.use]
+
+    print(f"Resolution:          {res} km")
+    print(f"Targets used:        {targets}")
+    print("Predictors used:")
+    for name in used_predictors:
         print(f"  - {name}")
-    print(f"Targets:\n  - {targets.source}")
-    # TODO: print traits
 
     print()
 
+    # Get data loaders
     print("--- DATA LOADERS ---")
+    zarr_dir = Path(
+        f"/scratch3/plant-traits-v2/data/chips/{res}km/"
+    )  # TODO: to specify in config later
     data_loader_cfg = cfg.training.data_loaders
     batch_size = data_loader_cfg.batch_size
-    zarr_path = Path(f"/scratch3/plant-traits-v2/data/chips/{res}km/")
+    num_workers = data_loader_cfg.num_workers
 
-    # TODO: to implement
-    get_train_dataloader(zarr_path, batch_size)
-    get_val_dataloader(zarr_path, batch_size)
+    print(f"Batch size:          {batch_size}")
+    print(f"Number of workers:   {num_workers}")
+
+    train_loader = get_dataloader(
+        zarr_dir,
+        split="train",
+        predictors=used_predictors,
+        target=targets,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
+
+    val_loader = get_dataloader(
+        zarr_dir,
+        split="val",
+        predictors=used_predictors,
+        target=targets,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
+
+    a = 0
 
     # # Get model
     # # TODO import code from Luca
 
     # # # print("Starting training...")
 
-    # # # finish wandb run
-    # # if cfg.wandb.enabled:
-    # #     run.finish()
+    # # finish wandb run
+    # if cfg.wandb.enabled:
+    #     run.finish()
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")

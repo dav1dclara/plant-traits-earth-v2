@@ -1,0 +1,13 @@
+data:
+  predictors:
+    canopy_height: true
+    modis: true
+    soilgrids: true
+    vodca: true
+    worldclim: true
+  targets:
+    gbif: false
+    splot: false
+
+patch_size: 128
+stride: 64
