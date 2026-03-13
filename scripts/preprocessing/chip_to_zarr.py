@@ -44,7 +44,7 @@ def main(cfg: DictConfig) -> None:
     print()
 
     # TODO: add split support — currently chips all data into a single store
-    output_path = zarr_dir / "train.zarr"
+    output_path = zarr_dir / f"patch{patch_size}_stride{stride}" / "train.zarr"
 
     chip_to_zarr(
         predictors=predictor_paths,

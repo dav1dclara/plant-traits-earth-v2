@@ -9,5 +9,5 @@ data:
     gbif: false
     splot: false
 
-patch_size: 128
-stride: 64
+patch_size: 15
+stride: 10

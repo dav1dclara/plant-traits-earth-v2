@@ -2,6 +2,8 @@ import math
 from datetime import datetime
 from pathlib import Path
 
+BUFFER_SIZE = 512
+
 import numpy as np
 import rasterio
 import rasterio.windows
@@ -125,7 +127,16 @@ def chip_to_zarr(
     )
 
     print("\nChipping...")
-    idx = 0
+    buffers = {
+        name: np.empty(
+            (BUFFER_SIZE, len(srcs), patch_size, patch_size), dtype=np.float32
+        )
+        for name, srcs in all_srcs.items()
+    }
+    bounds_buf = np.empty((BUFFER_SIZE, 4), dtype=np.float64)
+    buf_start = 0
+    buf_pos = 0
+
     for row in tqdm(range(n_rows), desc="Rows"):
         for col in range(n_cols):
             y, x = row * stride, col * stride
@@ -141,20 +152,32 @@ def chip_to_zarr(
                     ],
                     axis=0,
                 )
-                arrays[name][idx] = chip
+                buffers[name][buf_pos] = chip
 
             win_transform = rasterio.windows.transform(window, transform)
             min_x = win_transform.c
             max_y = win_transform.f
             max_x = min_x + patch_size * transform.a
             min_y = max_y + patch_size * transform.e
-            bounds_arr[idx] = [min_x, min_y, max_x, max_y]
+            bounds_buf[buf_pos] = [min_x, min_y, max_x, max_y]
 
-            idx += 1
+            buf_pos += 1
+
+            if buf_pos == BUFFER_SIZE:
+                for name in all_srcs:
+                    arrays[name][buf_start : buf_start + BUFFER_SIZE] = buffers[name]
+                bounds_arr[buf_start : buf_start + BUFFER_SIZE] = bounds_buf
+                buf_start += BUFFER_SIZE
+                buf_pos = 0
+
+    if buf_pos > 0:
+        for name in all_srcs:
+            arrays[name][buf_start : buf_start + buf_pos] = buffers[name][:buf_pos]
+        bounds_arr[buf_start : buf_start + buf_pos] = bounds_buf[:buf_pos]
 
     for srcs in all_srcs.values():
         for src in srcs:
             src.close()
 
-    print(f"\nDone. {idx} chips saved to {output_path}")
+    print(f"\nDone. {n_chips} chips saved to {output_path}")
     print_zarr_summary(store)
