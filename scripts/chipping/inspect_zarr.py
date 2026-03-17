@@ -1,0 +1,37 @@
+import zarr
+
+ZARR_DIR = "/scratch3/plant-traits-v2/data/chips/22km/patch15_stride10"
+SPLITS = ["train", "val", "test"]
+
+for split in SPLITS:
+    path = f"{ZARR_DIR}/{split}.zarr"
+    try:
+        z = zarr.open_group(path, mode="r")
+    except Exception:
+        print(f"[{split}] not found at {path}\n")
+        continue
+
+    print(f"{'=' * 50}")
+    print(f"  {split}.zarr")
+    print(f"{'=' * 50}")
+    print(f"  split:         {z.attrs.get('split')}")
+    print(f"  epsg_crs:      EPSG:{z.attrs.get('epsg_crs')}")
+    print(f"  res_km:        {z.attrs.get('res_km')}")
+    print(f"  patch_size:    {z.attrs.get('patch_size')}")
+    print(f"  stride:        {z.attrs.get('stride')}")
+    print(f"  creation_date: {z.attrs.get('creation_date')}")
+    print(f"  transform:     {z.attrs.get('transform')}")
+
+    print("\n  Arrays:")
+    for group_name, group in z.groups():
+        for arr_name, arr in group.arrays():
+            files = arr.attrs.get("files", [])
+            print(
+                f"    {group_name}/{arr_name}: shape={arr.shape}, dtype={arr.dtype}, chunks={arr.chunks}"
+            )
+            if files:
+                print(f"      files: {files}")
+
+    bounds = z["bounds"]
+    print(f"\n  bounds: shape={bounds.shape}, dtype={bounds.dtype}")
+    print()

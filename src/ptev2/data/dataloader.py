@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 import zarr
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 
 class PlantTraitDataset(Dataset):
@@ -25,18 +25,20 @@ class PlantTraitDataset(Dataset):
         self.store = zarr.open_group(str(zarr_path), mode="r")
         self.predictors = predictors
         self.target = target
-        self.n_chips = self.store[predictors[0]].shape[0]
+        self.n_chips = self.store[f"predictors/{predictors[0]}"].shape[0]
 
     def __len__(self) -> int:
         return self.n_chips
 
-    def __getitem__(
-        self, idx: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:  # TODO check this
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         X = torch.cat(
-            [torch.as_tensor(self.store[name][idx]) for name in self.predictors], dim=0
+            [
+                torch.as_tensor(self.store[f"predictors/{name}"][idx])
+                for name in self.predictors
+            ],
+            dim=0,
         )
-        y = torch.as_tensor(self.store[self.target][idx])
+        y = torch.as_tensor(self.store[f"targets/{self.target}"][idx])
         return X, y
 
 
@@ -66,7 +68,7 @@ def get_dataloader(
 
     dataset = PlantTraitDataset(zarr_path, predictors=predictors, target=target)
 
-    shuffle = True if split == "train" else False
+    shuffle = split == "train"
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers
     )

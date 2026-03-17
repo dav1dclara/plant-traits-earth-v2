@@ -1,11 +1,12 @@
+from pathlib import Path
+
 import hydra
 import torch
 from omegaconf import DictConfig
+from tqdm import tqdm
 
-from pathlib import Path
-
-from ptev2.utils import seed_all
 from ptev2.data.dataloader import get_dataloader
+from ptev2.utils import seed_all
 
 
 def train(cfg: DictConfig) -> None:
@@ -45,7 +46,7 @@ def train(cfg: DictConfig) -> None:
     # Get data loaders
     print("--- DATA LOADERS ---")
     zarr_dir = Path(
-        f"/scratch3/plant-traits-v2/data/chips/{res}km/"
+        f"/scratch3/plant-traits-v2/data/chips/{res}km/patch15_stride10/"
     )  # TODO: to specify in config later
     data_loader_cfg = cfg.training.data_loaders
     batch_size = data_loader_cfg.batch_size
@@ -63,21 +64,25 @@ def train(cfg: DictConfig) -> None:
         num_workers=num_workers,
     )
 
-    val_loader = get_dataloader(
-        zarr_dir,
-        split="val",
-        predictors=used_predictors,
-        target=targets,
-        batch_size=batch_size,
-        num_workers=num_workers,
-    )
-
-    a = 0
+    # val_loader = get_dataloader(
+    #     zarr_dir,
+    #     split="val",
+    #     predictors=used_predictors,
+    #     target=targets,
+    #     batch_size=batch_size,
+    #     num_workers=num_workers,
+    # )
 
     # # Get model
     # # TODO import code from Luca
 
-    # # # print("Starting training...")
+    # Training loop
+    print("\n--- TRAINING ---")
+    for batch_idx, (X, y) in enumerate(tqdm(train_loader, desc="Batches")):
+        if batch_idx == 0:
+            print(f"X shape: {X.shape}")
+            print(f"y shape: {y.shape}")
+        pass  # TODO: add forward pass, loss, backward, optimizer step
 
     # # finish wandb run
     # if cfg.wandb.enabled:

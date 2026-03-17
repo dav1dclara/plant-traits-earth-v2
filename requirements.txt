@@ -15,3 +15,6 @@ torchgeo
 rioxarray
 wandb
 tqdm
+pyarrow
+h3
+antimeridian

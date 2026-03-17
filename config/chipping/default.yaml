@@ -1,12 +1,14 @@
 data:
   predictors:
     canopy_height: true
-    modis: true
+    modis: false
     soilgrids: true
     vodca: true
     worldclim: true
   targets:
-    gbif: false
+    gbif:
+      enabled: true
+      traits: [1080]
     splot: false
 
 patch_size: 15
