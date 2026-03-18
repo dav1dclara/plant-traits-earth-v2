@@ -1,5 +1,9 @@
+patch_size: 15
+stride: 10
+
 data:
-  root:
+  root_dir: /scratch3/plant-traits-v2/data/22km/
+  predictors_dir: /scratch3/plant-traits-v2/data/22km/eo_data_processed/
   predictors:
     canopy_height:
       use: true
@@ -7,7 +11,7 @@ data:
     modis:
       use: true
       bands: []
-    soilgrids:
+    soil_grids:  # TODO: rename back to soilgrids
       use: true
       bands: []
     vodca:
@@ -25,7 +29,7 @@ data:
       use: false
       traits: [1080]
 
-patch_size: 15
-stride: 10
+splits:
+  h3_dir: /scratch3/plant-traits-v2/data/temp/h3_splits  # TODO improve
 
 zarr_dir: /scratch3/plant-traits-v2/data/chips/22km/

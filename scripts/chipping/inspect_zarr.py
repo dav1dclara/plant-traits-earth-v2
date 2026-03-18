@@ -30,7 +30,11 @@ for split in SPLITS:
                 f"    {group_name}/{arr_name}: shape={arr.shape}, dtype={arr.dtype}, chunks={arr.chunks}"
             )
             if files:
-                print(f"      files: {files}")
+                print(f"      files ({len(files)} total):")
+                for f in files[:5]:
+                    print(f"        {f}")
+                if len(files) > 5:
+                    print(f"        ...")
 
     bounds = z["bounds"]
     print(f"\n  bounds: shape={bounds.shape}, dtype={bounds.dtype}")

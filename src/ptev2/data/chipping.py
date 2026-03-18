@@ -202,7 +202,7 @@ def chip_to_zarr(
     output_dir: Path,
     patch_size: int,
     stride: int,
-    h3_gdf: gpd.GeoDataFrame,
+    h3_file: Path,
 ) -> None:
     """Chip predictor and target rasters into one zarr store per split.
 
@@ -217,14 +217,20 @@ def chip_to_zarr(
         output_dir: Directory where split zarr stores will be written.
         patch_size: Side length of each chip in pixels.
         stride: Step size between consecutive chips in pixels.
-        h3_gdf: GeoDataFrame of H3 hexagonal cells with a "split" column
-            used to assign each chip and pixel to a train/val/test split.
+        h3_file: Path to a GeoPackage of H3 hexagonal cells with a "split"
+            column used to assign each chip and pixel to a train/val/test split.
     """
+    print(f"Loading H3 split cells from '{h3_file.name}'...")
+    h3_gdf = gpd.read_file(h3_file)
+
     print("Opening datasets...")
     all_srcs = {
         name: [rasterio.open(f) for f in files]
         for name, files in {**predictors, **targets}.items()
     }
+    for name, srcs in all_srcs.items():
+        if not srcs:
+            raise ValueError(f"No files found for '{name}'. Check your data paths.")
 
     ref = next(iter(all_srcs.values()))[0]
     height, width, crs, transform = ref.height, ref.width, ref.crs, ref.transform
