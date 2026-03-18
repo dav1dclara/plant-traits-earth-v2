@@ -1,11 +1,12 @@
-import torch
+import importlib.util
+from pathlib import Path
+
 import hydra
+import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
-from pathlib import Path
-import wandb
-import importlib.util
 
+import wandb
 from ptev2.data.dataset import CanopyHeight, Modis, SoilGrids, Vodca, WorldClim
 from ptev2.utils import seed_all
 
