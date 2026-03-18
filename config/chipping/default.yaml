@@ -1,15 +1,31 @@
 data:
+  root:
   predictors:
-    canopy_height: true
-    modis: false
-    soilgrids: true
-    vodca: true
-    worldclim: true
+    canopy_height:
+      use: true
+      bands: []
+    modis:
+      use: true
+      bands: []
+    soilgrids:
+      use: true
+      bands: []
+    vodca:
+      use: true
+      bands: []
+    worldclim:
+      use: true
+      bands: []
+
   targets:
     gbif:
-      enabled: true
+      use: true
       traits: [1080]
-    splot: false
+    splot:
+      use: false
+      traits: [1080]
 
 patch_size: 15
 stride: 10
+
+zarr_dir: /scratch3/plant-traits-v2/data/chips/22km/

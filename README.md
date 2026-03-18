@@ -55,3 +55,17 @@ pre-commit install
 ├── pyproject.toml
 └── requirements.txt
 ```
+
+
+## Pipeline
+
+### Pre-processing
+
+
+
+
+### Data splitting
+
+
+
+### Data chipping

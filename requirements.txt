@@ -18,3 +18,4 @@ tqdm
 pyarrow
 h3
 antimeridian
+rich

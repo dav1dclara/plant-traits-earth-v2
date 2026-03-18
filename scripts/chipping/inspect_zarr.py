@@ -15,7 +15,7 @@ for split in SPLITS:
     print(f"  {split}.zarr")
     print(f"{'=' * 50}")
     print(f"  split:         {z.attrs.get('split')}")
-    print(f"  epsg_crs:      EPSG:{z.attrs.get('epsg_crs')}")
+    print(f"  crs_epsg:      EPSG:{z.attrs.get('crs_epsg')}")
     print(f"  res_km:        {z.attrs.get('res_km')}")
     print(f"  patch_size:    {z.attrs.get('patch_size')}")
     print(f"  stride:        {z.attrs.get('stride')}")

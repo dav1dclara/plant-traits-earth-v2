@@ -2,41 +2,127 @@ import math
 from datetime import datetime
 from pathlib import Path
 
-BUFFER_SIZE = 512
-
+import geopandas as gpd
 import numpy as np
 import rasterio
 import rasterio.windows
 import zarr
+from rasterio.features import rasterize
+from shapely.geometry import Point
 from tqdm import tqdm
 
+BUFFER_SIZE = 512
+SPLIT_ENCODING = {"train": 0, "val": 1, "test": 2}  # -1 = unknown
 
-def print_zarr_summary(store: zarr.Group) -> None:
-    """Print the structure and attributes of a zarr store."""
-    print("--- ZARR SUMMARY ---")
-    print()
-    print("Attributes:")
-    for k, v in store.attrs.items():
-        print(f"  - {k}: {v}")
-    print()
 
-    print("\nArrays:")
-    for group_name, group in store.groups():
-        for arr_name, arr in group.arrays():
-            print(f"{group_name}/{arr_name}")
-            print(f"  - shape={arr.shape}")
-            print(f"  - dtype={arr.dtype}")
-            print(f"  - chunks={arr.chunks}")
+def compute_split_labels(
+    ref_tif: Path,
+    patch_size: int,
+    stride: int,
+    h3_gdf: gpd.GeoDataFrame,
+) -> np.ndarray:
+    """Assign a split label to every chip extracted from a raster.
 
-            if "files" in arr.attrs:
-                print("  - files:")
-                for f in arr.attrs["files"]:
-                    print(f"      - {f}")
+    Chips are defined by sliding a window of size `patch_size` across the raster
+    with a given `stride`. Each chip is assigned the split of the H3 cell that
+    contains its center point. Chips whose center falls outside all H3 cells are
+    labeled -1 (unknown).
 
-    print("\nBounds:")
-    bounds = store["bounds"]
-    print(f"  - shape={bounds.shape}")
-    print(f"  - dtype={bounds.dtype}")
+    Args:
+        ref_tif: Path to a reference GeoTIFF defining the raster grid (CRS,
+            transform, and dimensions). Only metadata is read, not pixel data.
+        patch_size: Side length of each chip in pixels.
+        stride: Step size between consecutive chips in pixels.
+        h3_gdf: GeoDataFrame of H3 hexagonal cells with a "split" column
+            containing split name string labels.
+
+    Returns:
+        Int8 array of shape (n_chips,) with values from SPLIT_ENCODING, or -1
+        for chips not covered by any H3 cell. Ordered row-major (left-to-right,
+        top-to-bottom).
+    """
+    # Read the raster grid metadata from the reference TIF
+    with rasterio.open(ref_tif) as src:
+        transform = src.transform
+        height, width = src.height, src.width
+
+    # Compute the number of chips along each axis
+    n_cols = math.ceil((width - patch_size) / stride) + 1
+    n_rows = math.ceil((height - patch_size) / stride) + 1
+
+    # Compute the geographic coordinates of each chip's center point.
+    # transform.c / transform.f are the top-left corner coordinates,
+    # transform.a / transform.e are the pixel width and height (e is negative).
+    xs, ys = [], []
+    for row in range(n_rows):
+        for col in range(n_cols):
+            cx = transform.c + (col * stride + patch_size / 2) * transform.a
+            cy = transform.f + (row * stride + patch_size / 2) * transform.e
+            xs.append(cx)
+            ys.append(cy)
+
+    # Spatial join: find which H3 cell each chip center falls within
+    centers = gpd.GeoDataFrame(
+        {"chip_idx": range(len(xs))},
+        geometry=[Point(x, y) for x, y in zip(xs, ys)],
+        crs=h3_gdf.crs,
+    )
+    joined = gpd.sjoin(
+        centers, h3_gdf[["split", "geometry"]], how="left", predicate="within"
+    )
+
+    # Map split names to integer codes; chips with no matching H3 cell stay -1
+    labels = np.full(len(xs), -1, dtype=np.int8)
+    matched = joined["split"].notna()
+    labels[joined.loc[matched, "chip_idx"].values] = (
+        joined.loc[matched, "split"]
+        .map(SPLIT_ENCODING)
+        .fillna(-1)
+        .astype(np.int8)
+        .values
+    )
+
+    for name, code in SPLIT_ENCODING.items():
+        print(f"  {name}: {(labels == code).sum():,} chips")
+    print(f"  unknown: {(labels == -1).sum():,} chips")
+    return labels
+
+
+def compute_pixel_split_mask(ref_tif: Path, h3_gdf: gpd.GeoDataFrame) -> np.ndarray:
+    """Rasterize the H3 split grid onto the reference raster grid.
+
+    Projects H3 hexagonal cells onto the pixel grid of the reference raster,
+    burning each cell's split code into the corresponding pixels. Used during
+    chipping to mask out pixels that belong to a different split than the chip.
+
+    Args:
+        ref_tif: Path to a reference GeoTIFF defining the target raster grid
+            (CRS, transform, and dimensions).
+        h3_gdf: GeoDataFrame of H3 hexagonal cells with a "split" column
+            containing split name string labels.
+
+    Returns:
+        Int8 array of shape (height, width) with values from SPLIT_ENCODING,
+        or -1 where no H3 cell covers the pixel.
+    """
+    with rasterio.open(ref_tif) as src:
+        transform = src.transform
+        height, width = src.height, src.width
+        h3_proj = h3_gdf.to_crs(src.crs)
+
+    split_codes = h3_proj["split"].map(SPLIT_ENCODING).fillna(-1).astype(int)
+    shapes = [
+        (geom, int(code))
+        for geom, code in zip(h3_proj.geometry, split_codes)
+        if geom is not None
+    ]
+    return rasterize(
+        shapes=shapes,
+        out_shape=(height, width),
+        transform=transform,
+        fill=-1,
+        dtype=np.int8,
+    )
 
 
 def _init_zarr_store(
@@ -51,11 +137,32 @@ def _init_zarr_store(
     crs,
     transform,
 ) -> tuple[zarr.Group, dict, zarr.Array]:
-    """Create and pre-allocate a zarr store for one split."""
+    """Create and pre-allocate a zarr store for a single split.
+
+    Opens a new zarr group at `path`, writes raster metadata as group
+    attributes, and pre-allocates one array per predictor and target of shape
+    (n_chips, n_bands, patch_size, patch_size). Also allocates a bounds array
+    of shape (n_chips, 4) for storing chip bounding boxes.
+
+    Args:
+        path: Output path for the zarr store (e.g. output_dir/train.zarr).
+        n_chips: Number of chips that will be written to this split.
+        split_name: Name of the split (e.g. "train"), stored as an attribute.
+        predictors: Dict mapping predictor name to list of source TIF paths.
+        targets: Dict mapping target name to list of source TIF paths.
+        all_srcs: Dict mapping name to list of open rasterio datasets.
+        patch_size: Side length of each chip in pixels.
+        stride: Step size between consecutive chips in pixels.
+        crs: Coordinate reference system of the raster grid.
+        transform: Affine transform of the raster grid.
+
+    Returns:
+        Tuple of (zarr group, dict of pre-allocated arrays, bounds array).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     store = zarr.open_group(str(path), mode="w")
     store.attrs["split"] = split_name
-    store.attrs["epsg_crs"] = crs.to_epsg()
+    store.attrs["crs_epsg"] = crs.to_epsg()
     store.attrs["res_km"] = [transform.a, abs(transform.e)]
     store.attrs["transform"] = list(transform)
     store.attrs["patch_size"] = patch_size
@@ -95,18 +202,23 @@ def chip_to_zarr(
     output_dir: Path,
     patch_size: int,
     stride: int,
-    split_labels: np.ndarray,
-    split_encoding: dict[str, int],
-    pixel_split_mask: np.ndarray | None = None,
+    h3_gdf: gpd.GeoDataFrame,
 ) -> None:
-    """
-    Chip rasters into one zarr store per split in output_dir.
+    """Chip predictor and target rasters into one zarr store per split.
+
+    Computes per-chip split labels and a pixel-level split mask from the H3
+    grid, then slides a window of size `patch_size` across all rasters with
+    the given `stride`, routing each chip to the zarr store of its split.
+    Pixels that belong to a different split than the chip are set to NaN.
 
     Args:
-        split_labels:    int8 array (n_chips,) mapping each chip to a split code.
-        split_encoding:  e.g. {"train": 0, "val": 1, "test": 2}; -1 = unknown/skip.
-        pixel_split_mask: int8 array (height, width) with the same encoding;
-                         pixels outside a chip's own split are set to NaN.
+        predictors: Dict mapping predictor name to list of source TIF paths.
+        targets: Dict mapping target name to list of source TIF paths.
+        output_dir: Directory where split zarr stores will be written.
+        patch_size: Side length of each chip in pixels.
+        stride: Step size between consecutive chips in pixels.
+        h3_gdf: GeoDataFrame of H3 hexagonal cells with a "split" column
+            used to assign each chip and pixel to a train/val/test split.
     """
     print("Opening datasets...")
     all_srcs = {
@@ -117,6 +229,11 @@ def chip_to_zarr(
     ref = next(iter(all_srcs.values()))[0]
     height, width, crs, transform = ref.height, ref.width, ref.crs, ref.transform
     print(f"Reference grid: {height}×{width}, CRS=EPSG:{crs.to_epsg()}")
+
+    print("Computing chip-level split labels...")
+    split_labels = compute_split_labels(ref.name, patch_size, stride, h3_gdf)
+    print("Rasterizing H3 split grid to pixel mask...")
+    pixel_split_mask = compute_pixel_split_mask(ref.name, h3_gdf)
 
     for name, srcs in all_srcs.items():
         for src in srcs:
@@ -132,9 +249,9 @@ def chip_to_zarr(
     print(f"Chips: {n_rows} rows × {n_cols} cols = {n_chips} total\n")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    code_to_name = {code: name for name, code in split_encoding.items()}
+    code_to_name = {code: name for name, code in SPLIT_ENCODING.items()}
     n_per_split = {
-        name: int((split_labels == code).sum()) for name, code in split_encoding.items()
+        name: int((split_labels == code).sum()) for name, code in SPLIT_ENCODING.items()
     }
     print("Chips per split:")
     for name, n in n_per_split.items():
@@ -176,14 +293,14 @@ def chip_to_zarr(
             )
             for name in all_srcs
         }
-        for split_name in split_encoding
+        for split_name in SPLIT_ENCODING
     }
     split_bounds_bufs = {
         split_name: np.empty((BUFFER_SIZE, 4), dtype=np.float64)
-        for split_name in split_encoding
+        for split_name in SPLIT_ENCODING
     }
-    split_buf_pos = {split_name: 0 for split_name in split_encoding}
-    split_buf_start = {split_name: 0 for split_name in split_encoding}
+    split_buf_pos = {split_name: 0 for split_name in SPLIT_ENCODING}
+    split_buf_start = {split_name: 0 for split_name in SPLIT_ENCODING}
 
     def flush(split_name: str, count: int) -> None:
         start = split_buf_start[split_name]
@@ -253,7 +370,7 @@ def chip_to_zarr(
                 split_buf_pos[split_name] = 0
 
     # Final flush
-    for split_name in split_encoding:
+    for split_name in SPLIT_ENCODING:
         pos = split_buf_pos[split_name]
         if pos > 0:
             flush(split_name, pos)
