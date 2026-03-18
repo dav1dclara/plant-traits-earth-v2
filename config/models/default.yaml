@@ -1,0 +1,22 @@
+name: "respatch"  # Options: "baseline", "respatch"
+
+registry:
+  baseline:
+    _target_: ptev2.models.baseline.PadarianInspiredPatchCNN
+    in_channels: ${data.in_channels}
+    n_traits: ${data.n_traits}
+    hidden_dim: 64
+    dropout_p: 0.3
+    head_type: "single"
+
+  respatch:
+    _target_: ptev2.models.traitPatchCNN.ResPatchCenterCNN
+    in_channels: ${data.in_channels}
+    n_traits: ${data.n_traits}
+    base_channels: 32
+    norm: "gn"
+    gn_groups: 8
+    stride_blocks: [1, 2, 1, 2]
+    dropout_p: 0.1
+
+active: ${.registry.${.name}}

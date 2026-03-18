@@ -1,26 +1,16 @@
-# Training hyperparameters (epochs, lr, batch size, ...)
-data:
-  res: 22
-  targets:
-    source: gbif  # gbif or splot
-    trait_ids: [1080]  # empty = all traits
-  predictors:
-    canopy_height:
-      use: true
-      bands: []
-    modis:
-      use: true
-      bands: []
-    soil_grids:  # TODO: rename to soilgrids
-      use: true
-      bands: []
-    vodca:
-      use: true
-      bands: []
-    worldclim:
-      use: true
-      bands: []
+seed: 0
+device: "cuda"
+epochs: 10
 
-data_loaders:
-  batch_size: 32
-  num_workers: 4
+loss:
+  _target_: torch.nn.MSELoss
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1e-3
+  weight_decay: 1e-4
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.StepLR
+  step_size: 5
+  gamma: 0.5

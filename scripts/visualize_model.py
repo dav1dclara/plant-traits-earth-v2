@@ -5,6 +5,7 @@ Visualisiert die Modell-Architektur und speichert sie als Bild.
 
 import torch
 from torchview import draw_graph
+from pathlib import Path
 from ptev2.models.baseline import PadarianInspiredPatchCNN
 from ptev2.models.traitPatchCNN import ResPatchCenterCNN
 
@@ -31,6 +32,13 @@ def visualize_and_save(
     print(f"Erstelle Visualisierung von {model.__class__.__name__}...")
     print(f"Input Shape: {input_shape}")
 
+    # Erstelle Ausgabeverzeichnis falls nicht vorhanden
+    output_dir = Path("plant-traits-earth-v2/viz/model")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Vollständiger Pfad für Ausgabe
+    full_save_path = output_dir / save_path
+
     # Erstelle Visualisierung
     model_graph = draw_graph(
         model,
@@ -39,14 +47,14 @@ def visualize_and_save(
         depth=depth,
         expand_nested=True,
         save_graph=True,
-        filename=save_path,
+        filename=str(full_save_path),
         directory=".",
     )
 
     # Speichere als gewünschtes Format
-    output_file = f"{save_path}.{format}"
+    output_file = f"{full_save_path}.{format}"
     model_graph.visual_graph.render(
-        filename=save_path,
+        filename=str(full_save_path),
         format=format,
         cleanup=True,
     )
@@ -109,12 +117,13 @@ if __name__ == "__main__":
 
     # ResPatchCenterCNN model
     model_res = ResPatchCenterCNN(
-        in_channels=54,  # 50 predictors + 4 trig coord channels
+        in_channels=54,
         n_traits=31,
         base_channels=32,
         norm="gn",
-        dropout_p=0.1,
-        use_residual=True,
+        gn_groups=8,
+        stride_blocks=(1, 1, 1, 1),  # safe for 15x15 patches
+        dropout_p=0.5,
     )
 
     visualize_and_save(
@@ -126,6 +135,6 @@ if __name__ == "__main__":
     )
 
     print("\n✅ Alle Visualisierungen erstellt!")
-    print("   - padarian_single_head.png")
-    print("   - padarian_multi_head.png")
-    print("   - res_patch_center_cnn.png")
+    print("   - viz/model/padarian_single_head.png")
+    print("   - viz/model/padarian_multi_head.png")
+    print("   - viz/model/res_patch_center_cnn.png")

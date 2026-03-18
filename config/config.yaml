@@ -1,6 +1,8 @@
 defaults:
+  - paths: default
   - data: default
   - chipping: default
+  - models: default
   - training: default
-  - wandb
+  - wandb: default
   - _self_
