@@ -9,16 +9,16 @@ data:
       use: true
       bands: []
     modis:
-      use: false
+      use: true
       bands: []
-    soilgrids:
-      use: false
+    soil_grids:  # TODO: rename to soilgrids
+      use: true
       bands: []
     vodca:
-      use: false
+      use: true
       bands: []
     worldclim:
-      use: false
+      use: true
       bands: []
 
 data_loaders:

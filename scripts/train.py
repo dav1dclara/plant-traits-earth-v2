@@ -64,14 +64,14 @@ def train(cfg: DictConfig) -> None:
         num_workers=num_workers,
     )
 
-    # val_loader = get_dataloader(
-    #     zarr_dir,
-    #     split="val",
-    #     predictors=used_predictors,
-    #     target=targets,
-    #     batch_size=batch_size,
-    #     num_workers=num_workers,
-    # )
+    val_loader = get_dataloader(
+        zarr_dir,
+        split="val",
+        predictors=used_predictors,
+        target=targets,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
 
     # # Get model
     # # TODO import code from Luca
