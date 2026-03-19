@@ -1,5 +1,15 @@
-patch_size: 15
-stride: 10
+# Configuration file for chipping process
+# Currently fixed to 22km data and trait X1080 -> # TODO: make more flexible
+
+paths:
+  predictors_dir: /scratch3/plant-traits-v2/data/22km/eo_data_processed/
+  targets_dir: /scratch3/plant-traits-v2/data/22km/
+  splits_file: /scratch3/plant-traits-v2/data/temp/h3_splits/h3_res1_X1080_mean.gpkg
+  zarr_dir: /scratch3/plant-traits-v2/data/chips/22km/
+
+settings:
+  patch_size: 15
+  stride: 10
 
 data:
   root_dir: /scratch3/plant-traits-v2/data/22km/
@@ -28,8 +38,3 @@ data:
     splot:
       use: false
       traits: [1080]
-
-splits:
-  h3_dir: /scratch3/plant-traits-v2/data/temp/h3_splits  # TODO improve
-
-zarr_dir: /scratch3/plant-traits-v2/data/chips/22km/

@@ -82,9 +82,6 @@ def compute_split_labels(
         .values
     )
 
-    for name, code in SPLIT_ENCODING.items():
-        print(f"  {name}: {(labels == code).sum():,} chips")
-    print(f"  unknown: {(labels == -1).sum():,} chips")
     return labels
 
 
@@ -196,7 +193,7 @@ def _init_zarr_store(
     return store, arrays, bounds_arr
 
 
-def chip_to_zarr(
+def chip_rasters_to_zarr(
     predictors: dict[str, list[Path]],
     targets: dict[str, list[Path]],
     output_dir: Path,
@@ -220,10 +217,7 @@ def chip_to_zarr(
         h3_file: Path to a GeoPackage of H3 hexagonal cells with a "split"
             column used to assign each chip and pixel to a train/val/test split.
     """
-    print(f"Loading H3 split cells from '{h3_file.name}'...")
-    h3_gdf = gpd.read_file(h3_file)
-
-    print("Opening datasets...")
+    # get reference raster metadata
     all_srcs = {
         name: [rasterio.open(f) for f in files]
         for name, files in {**predictors, **targets}.items()
@@ -233,13 +227,14 @@ def chip_to_zarr(
             raise ValueError(f"No files found for '{name}'. Check your data paths.")
 
     ref = next(iter(all_srcs.values()))[0]
-    height, width, crs, transform = ref.height, ref.width, ref.crs, ref.transform
-    print(f"Reference grid: {height}×{width}, CRS=EPSG:{crs.to_epsg()}")
+    print(f"Reference dataset:\n  {Path(ref.name)}")
 
-    print("Computing chip-level split labels...")
-    split_labels = compute_split_labels(ref.name, patch_size, stride, h3_gdf)
-    print("Rasterizing H3 split grid to pixel mask...")
-    pixel_split_mask = compute_pixel_split_mask(ref.name, h3_gdf)
+    height, width, crs, transform = ref.height, ref.width, ref.crs, ref.transform
+    print("Reference grid")
+    print(f"  Resolution:   {abs(transform.a):.2f} × {abs(transform.e):.2f}")
+    print(f"  Height:       {height} px")
+    print(f"  Width:        {width} px")
+    print(f"  CRS:          EPSG:{crs.to_epsg()}")
 
     for name, srcs in all_srcs.items():
         for src in srcs:
@@ -248,6 +243,18 @@ def chip_to_zarr(
             )
             assert src.crs == crs, f"{name}: CRS mismatch"
             assert src.transform == transform, f"{name}: transform mismatch"
+    print("All datasets match reference grid!")
+
+    print()
+
+    # compute split labels and pixel mask from H3 grid  TODO: rewrite with our own splits as soon as we have them
+    print(f"H3 split cells:\n  {h3_file}")
+    h3_gdf = gpd.read_file(h3_file)
+
+    print("Computing chip-level split labels...")
+    split_labels = compute_split_labels(ref.name, patch_size, stride, h3_gdf)
+    print("Rasterizing H3 split grid to pixel mask...")
+    pixel_split_mask = compute_pixel_split_mask(ref.name, h3_gdf)
 
     n_cols = math.ceil((width - patch_size) / stride) + 1
     n_rows = math.ceil((height - patch_size) / stride) + 1
