@@ -1,5 +1,5 @@
 seed: 0 # Random seed for reproducibility, change to a different value for a different random seed.
-epochs: 25
+epochs: 50
 run_name: null
 
 checkpoint:
