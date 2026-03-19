@@ -1,2 +1,3 @@
 # Data roots and output directories
 data_root_dir: /scratch3/plant-traits-v2/data
+models_dir: /scratch3/plant-traits-v2/models

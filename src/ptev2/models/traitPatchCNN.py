@@ -62,7 +62,7 @@ class ResidualBlock(nn.Module):
             bias=False,
         )
         self.norm1 = _make_norm(norm, out_channels, gn_groups=gn_groups)
-        self.act1 = nn.ReLU(inplace=True)
+        self.act1 = nn.PReLU(num_parameters=out_channels)
         self.drop = nn.Dropout2d(dropout_p) if dropout_p > 0 else nn.Identity()
 
         self.conv2 = nn.Conv2d(
@@ -89,7 +89,7 @@ class ResidualBlock(nn.Module):
         else:
             self.skip = nn.Identity()
 
-        self.act_out = nn.ReLU(inplace=True)
+        self.act_out = nn.PReLU(num_parameters=out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = self.skip(x)
@@ -107,26 +107,26 @@ class ResidualBlock(nn.Module):
         return out
 
 
-class ResPatchCenterCNN(nn.Module):
+class ResPatchCNN(nn.Module):
     """
-    Patch-based residual CNN for center-cell multi-trait regression.
+    Patch-based residual CNN for multi-output regression with full spatial output.
 
     Intended use:
         - Input:  raster patch of shape (B, C, H, W)
-        - Output: trait vector for the center cell, shape (B, n_traits)
+        - Output: prediction map of shape (B, out_channels, H_out, W_out)
 
     Notes:
-        - Input patch size must be odd (e.g. 15x15 or 25x25)
-        - Output feature map size must also remain odd so the center location
-          is well-defined
-        - For 15x15 patches, a safe default is stride_blocks=(1, 1, 1, 1)
-        - For 25x25 patches, stride_blocks=(1, 2, 1, 2) is also valid
+        - Output spatial size depends on stride_blocks configuration
+        - For stride_blocks=(1, 1, 1, 1), output size ≈ input size
+        - For stride_blocks with values > 1, output will be downsampled
+        - Each output pixel predicts traits for the corresponding input region
     """
 
     def __init__(
         self,
         in_channels: int,
-        n_traits: int = 31,
+        out_channels: int = 31,
+        n_traits: int | None = None,
         base_channels: int = 32,
         norm: Literal["bn", "gn", "none"] = "gn",
         gn_groups: int = 8,
@@ -134,6 +134,13 @@ class ResPatchCenterCNN(nn.Module):
         dropout_p: float = 0.0,
     ) -> None:
         super().__init__()
+        # Backward compatibility: old configs/scripts may still pass n_traits.
+        if n_traits is not None:
+            out_channels = int(n_traits)
+
+        if out_channels < 1:
+            raise ValueError(f"out_channels must be >= 1, got {out_channels}.")
+
         if len(stride_blocks) != 4:
             raise ValueError(
                 f"stride_blocks must have 4 entries, got {len(stride_blocks)}."
@@ -180,44 +187,29 @@ class ResPatchCenterCNN(nn.Module):
             dropout_p=dropout_p,
         )
 
-        # Per-pixel trait prediction map; center cell is extracted in forward()
-        self.head = nn.Conv2d(c3, n_traits, kernel_size=1, bias=True)
+        # Per-pixel prediction head
+        self.head = nn.Conv2d(c3, out_channels, kernel_size=1, bias=True)
 
         self.in_channels = in_channels
-        self.n_traits = n_traits
+        self.out_channels = out_channels
+        self.n_traits = out_channels
         self.base_channels = base_channels
         self.norm = norm
         self.gn_groups = gn_groups
         self.stride_blocks = stride_blocks
         self.dropout_p = dropout_p
 
-    @staticmethod
-    def _center_index(height: int, width: int) -> tuple[int, int]:
-        """Return the unique center index of an odd-sized spatial map."""
-        if height % 2 == 0 or width % 2 == 0:
-            raise ValueError(
-                "Output feature map must have odd spatial dimensions for true "
-                f"center-cell prediction, got H={height}, W={width}."
-            )
-        return height // 2, width // 2
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Tensor of shape (B, C, H, W), with odd H and W
+            x: Tensor of shape (B, C, H, W)
 
         Returns:
-            Tensor of shape (B, n_traits)
+            Tensor of shape (B, out_channels, H_out, W_out)
         """
         if x.ndim != 4:
             raise ValueError(
                 f"Expected input of shape (B, C, H, W), got {tuple(x.shape)}"
-            )
-
-        _, _, height, width = x.shape
-        if height % 2 == 0 or width % 2 == 0:
-            raise ValueError(
-                f"Input patch size must be odd, got H={height}, W={width}."
             )
 
         z = self.block1(x)
@@ -225,27 +217,20 @@ class ResPatchCenterCNN(nn.Module):
         z = self.block3(z)
         z = self.block4(z)
 
-        y_map = self.head(z)  # (B, n_traits, H_out, W_out)
-
-        _, _, out_h, out_w = y_map.shape
-        ci, cj = self._center_index(out_h, out_w)
-
-        # Extract trait vector for the center cell only
-        y_center = y_map[:, :, ci, cj]  # (B, n_traits)
-        return y_center
+        y_map = self.head(z)  # (B, out_channels, H_out, W_out)
+        return y_map
 
 
 if __name__ == "__main__":
     torch.manual_seed(0)
 
-    model = ResPatchCenterCNN(
+    model = ResPatchCNN(
         in_channels=54,
-        n_traits=31,
+        out_channels=31,
         base_channels=32,
         norm="gn",
         gn_groups=8,
-        stride_blocks=(1, 1, 1, 1),  # safe for 15x15 patches
-        # For 25x25 patches, can also use stride_blocks=(1, 2, 1, 2) for more downsampling
+        stride_blocks=(1, 1, 1, 1),  # no downsampling
         dropout_p=0.1,
     )
 
@@ -253,4 +238,5 @@ if __name__ == "__main__":
     y = model(x)
 
     print(model)
+    print("Input shape:", x.shape)
     print("Output shape:", y.shape)
