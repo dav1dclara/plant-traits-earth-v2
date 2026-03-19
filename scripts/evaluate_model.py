@@ -1,17 +1,18 @@
 import json
-import math
 from pathlib import Path
 
 import hydra
 import numpy as np
 import torch
-import wandb
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
-from sklearn.metrics import r2_score
 from tqdm import tqdm
 
+import wandb
 from ptev2.data.dataloader import get_dataloader
+from ptev2.metrics.aoa import collect_patch_features, compute_aoa_metrics
+from ptev2.metrics.core import pearson_r as pearson_r_metric
+from ptev2.metrics.core import r2_score
 from ptev2.utils import (
     run_name_from_cfg,
     seed_all,
@@ -26,83 +27,6 @@ def _band_names_for_source(source: str, bands_per_trait: int) -> list[str]:
         if source_l == "splot":
             return ["mean", "count", "std", "median", "q05", "q95"]
     return [f"band{i}" for i in range(1, bands_per_trait + 1)]
-
-
-def _channelwise_patch_mean(x: torch.Tensor) -> torch.Tensor:
-    """Compute per-sample channel means over spatial dims, ignoring non-finite values."""
-    finite = torch.isfinite(x)
-    counts = finite.sum(dim=(2, 3))
-    summed = torch.where(finite, x, torch.zeros_like(x)).sum(dim=(2, 3))
-    means = torch.where(
-        counts > 0,
-        summed / counts.clamp_min(1),
-        torch.zeros_like(summed),
-    )
-    return means
-
-
-def _collect_features(loader, device: torch.device) -> torch.Tensor:
-    features: list[torch.Tensor] = []
-    with torch.no_grad():
-        for X, _ in tqdm(loader, desc="Collecting AoA features"):
-            X = X.to(device=device, dtype=torch.float32)
-            features.append(_channelwise_patch_mean(X).cpu())
-    if not features:
-        raise ValueError("No samples available to compute AoA features.")
-    return torch.cat(features, dim=0)
-
-
-def _min_distances_to_reference(
-    queries: torch.Tensor,
-    reference: torch.Tensor,
-    block_size: int = 2048,
-) -> torch.Tensor:
-    mins = []
-    for start in range(0, queries.shape[0], block_size):
-        q_block = queries[start : start + block_size]
-        dist = torch.cdist(q_block, reference)
-        mins.append(dist.min(dim=1).values)
-    return torch.cat(mins, dim=0)
-
-
-def _compute_aoa_metrics(
-    train_features: torch.Tensor,
-    test_features: torch.Tensor,
-    q: float = 0.95,
-) -> dict:
-    train_mean = train_features.mean(dim=0)
-    train_std = train_features.std(dim=0)
-    train_std = torch.where(train_std > 1e-8, train_std, torch.ones_like(train_std))
-
-    train_z = (train_features - train_mean) / train_std
-    test_z = (test_features - train_mean) / train_std
-
-    # Leave-one-out nearest-neighbor distance in train space (self-distance masked).
-    loo_min = []
-    block_size = 1024
-    n_train = train_z.shape[0]
-    for start in range(0, n_train, block_size):
-        stop = min(start + block_size, n_train)
-        q_block = train_z[start:stop]
-        dist = torch.cdist(q_block, train_z)
-        row_idx = torch.arange(stop - start)
-        col_idx = torch.arange(start, stop)
-        dist[row_idx, col_idx] = math.inf
-        loo_min.append(dist.min(dim=1).values)
-    loo_min = torch.cat(loo_min, dim=0)
-
-    aoa_threshold = float(torch.quantile(loo_min, q).item())
-    test_min = _min_distances_to_reference(test_z, train_z)
-    in_aoa = test_min <= aoa_threshold
-    aoa_coverage = float(in_aoa.float().mean().item())
-
-    return {
-        "aoa_threshold": aoa_threshold,
-        "aoa_quantile": q,
-        "aoa_coverage": aoa_coverage,
-        "aoa_outside_fraction": float(1.0 - aoa_coverage),
-        "aoa_test_n": int(test_min.numel()),
-    }
 
 
 def _infer_checkpoint_output_channels(
@@ -209,9 +133,9 @@ def evaluate_model(cfg: DictConfig) -> dict:
             batch_size=batch_size,
             num_workers=num_workers,
         )
-        train_features = _collect_features(train_loader, device=device)
-        test_features = _collect_features(test_loader, device=device)
-        aoa_metrics = _compute_aoa_metrics(train_features, test_features, q=0.95)
+        train_features = collect_patch_features(train_loader, device=device)
+        test_features = collect_patch_features(test_loader, device=device)
+        aoa_metrics = compute_aoa_metrics(train_features, test_features, q=0.95)
 
     checkpoint_override = OmegaConf.select(cfg, "evaluation.checkpoint_path")
     if checkpoint_override:
@@ -289,17 +213,7 @@ def evaluate_model(cfg: DictConfig) -> dict:
         n_valid = int(y_true_vec.size)
 
         r2 = float(r2_score(y_true_vec, y_pred_vec))
-
-        if n_valid > 1:
-            std_pred = float(np.std(y_pred_vec))
-            std_true = float(np.std(y_true_vec))
-            pearson_r = (
-                float(np.corrcoef(y_pred_vec, y_true_vec)[0, 1])
-                if std_pred > 0 and std_true > 0
-                else float("nan")
-            )
-        else:
-            pearson_r = float("nan")
+        pearson_r = float(pearson_r_metric(y_true_vec, y_pred_vec))
     else:
         n_valid = 0
         r2 = float("nan")
