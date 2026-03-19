@@ -1,6 +1,29 @@
 seed: 0
 device: "cuda"
-epochs: 10
+epochs: 25
+
+data:
+  zarr_dir: /scratch3/plant-traits-v2/data/chips/22km_ps15_split
+  train_split: train
+  val_split: val
+  test_split: test
+  target:
+    source: traits
+  predictors:
+    canopy_height:
+      use: true
+    modis:
+      use: true
+    soilgrids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
+
+data_loaders:
+  batch_size: ${data.batch_size}
+  num_workers: 4
 
 loss:
   _target_: torch.nn.MSELoss

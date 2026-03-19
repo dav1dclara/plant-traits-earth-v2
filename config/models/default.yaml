@@ -16,7 +16,7 @@ registry:
     base_channels: 32
     norm: "gn"
     gn_groups: 8
-    stride_blocks: [1, 2, 1, 2]
+    stride_blocks: [1, 1, 1, 1]
     dropout_p: 0.1
 
 active: ${.registry.${.name}}
