@@ -11,8 +11,6 @@ omegaconf
 torch
 torchvision
 scikit-learn
-torchgeo
-rioxarray
 wandb
 tqdm
 pyarrow

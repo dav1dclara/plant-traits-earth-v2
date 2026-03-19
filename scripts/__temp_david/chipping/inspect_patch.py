@@ -2,8 +2,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
-ZARR_PATH = "/scratch3/plant-traits-v2/data/chips/22km/patch15_stride10/val.zarr"
-CHIP_IDX = 687
+ZARR_PATH = "/scratch3/plant-traits-v2/data/chips/22km/patch15_stride10/train.zarr"
+CHIP_IDX = 2490
 
 z = zarr.open_group(ZARR_PATH, mode="r")
 
