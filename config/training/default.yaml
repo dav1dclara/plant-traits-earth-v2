@@ -1,20 +1,29 @@
-seed: 0
-device: "cuda"
+seed: 0 # Random seed for reproducibility, change to a different value for a different random seed.
 epochs: 25
+run_name: null
+
+checkpoint:
+  save_model: true
+  dir: ${paths.models_dir}
 
 data:
-  zarr_dir: /scratch3/plant-traits-v2/data/chips/22km_ps15_split
+  zarr_dir: /scratch3/plant-traits-v2/data/chips/22km/patch15_stride10/
   train_split: train
   val_split: val
   test_split: test
   target:
-    source: traits
+    source: gbif
+    trait_ids: [1080]
+    # Position each trait in the stacked target tensor (0-based).
+    # Example: trait 1080 is currently stored at position 0.
+    trait_positions: [0]
+    bands_per_trait: 6
   predictors:
     canopy_height:
       use: true
     modis:
       use: true
-    soilgrids:
+    soil_grids:
       use: true
     vodca:
       use: true
@@ -23,10 +32,11 @@ data:
 
 data_loaders:
   batch_size: ${data.batch_size}
-  num_workers: 4
+  num_workers: 8
 
 loss:
-  _target_: torch.nn.MSELoss
+  _target_: ptev2.loss.MaskedMSELoss
+  reduction: mean
 
 optimizer:
   _target_: torch.optim.Adam
