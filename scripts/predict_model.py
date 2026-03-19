@@ -165,10 +165,10 @@ def predict_global(cfg: DictConfig) -> Path:
         raise ValueError(f"prediction.tile_size must be >= 1, got {tile_size}")
 
     apply_predictor_valid_mask = bool(
-        OmegaConf.select(cfg, "prediction.apply_predictor_valid_mask", default=False)
+        OmegaConf.select(cfg, "prediction.apply_predictor_valid_mask", default=True)
     )
     apply_reference_mask = bool(
-        OmegaConf.select(cfg, "prediction.apply_reference_mask", default=False)
+        OmegaConf.select(cfg, "prediction.apply_reference_mask", default=True)
     )
 
     predictor_files = _list_predictor_files(cfg)
@@ -250,6 +250,7 @@ def predict_global(cfg: DictConfig) -> Path:
                     )
 
                     x_parts: list[np.ndarray] = []
+                    valid_parts: list[np.ndarray] = []
                     for src in srcs:
                         arr = src.read(
                             window=read_window,
@@ -258,8 +259,18 @@ def predict_global(cfg: DictConfig) -> Path:
                         ).astype(np.float32)
                         x_parts.append(arr)
 
+                        # Use dataset masks to distinguish true data from boundless/no-data fill.
+                        band_valid = (
+                            src.read_masks(
+                                window=read_window,
+                                boundless=True,
+                            )
+                            > 0
+                        )
+                        valid_parts.append(band_valid)
+
                     x_np = np.concatenate(x_parts, axis=0)
-                    valid_core = np.isfinite(x_np).any(axis=0)
+                    valid_core = np.concatenate(valid_parts, axis=0).any(axis=0)
                     x = (
                         torch.from_numpy(x_np)
                         .unsqueeze(0)
