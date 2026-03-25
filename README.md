@@ -36,12 +36,20 @@ pre-commit install
 
 *(write about data preparation...)*
 
+### Splitting
+
+To split ..., run:
+
+```python
+python scripts/splitting/create_splits.py
+```
+
 ### Data chipping
 
 To chip predictor and target raster data into per-split [Zarr](https://zarr.dev/) stores, run:
 
 ```python
-python scripts/preprocessing/chip_rasters.py
+python scripts/chipping/chip_rasters.py
 ```
 
 The script slides a window of `patch_size × patch_size` pixels across all rasters with a given `stride`, producing one chip per position. Each chip is routed to `train`, `val`, or `test` based on which H3 hexagonal cell its center falls in. Pixels within a chip that belong to a different split are masked to `NaN` to prevent data leakage across boundaries. The output is one zarr store per split (e.g. `train.zarr`). Each store contains two groups — `predictors/` and `targets/` — with arrays of shape `(n_chips, n_bands, patch_size, patch_size)`, plus a `bounds` array with the geographic bounding box of each chip.

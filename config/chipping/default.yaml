@@ -3,13 +3,14 @@
 
 paths:
   predictors_dir: /scratch3/plant-traits-v2/data/22km/eo_data_processed/
-  targets_dir: /scratch3/plant-traits-v2/data/22km/
-  splits_file: /scratch3/plant-traits-v2/data/temp/h3_splits/h3_res1_X1080_mean.gpkg
-  zarr_dir: /scratch3/plant-traits-v2/data/chips/22km/
+  targets_dir: /scratch3/plant-traits-v2/data/22km/targets/
+  splits_file: /scratch3/plant-traits-v2/data/22km/splits/h3_splits_res2_comb_22km.gpkg
+  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips/
 
 settings:
-  patch_size: 15
-  stride: 10
+  patch_size: 25
+  stride: 20        # train and val
+  stride_test: 25   # test: non-overlapping (= patch_size)
 
 data:
   root_dir: /scratch3/plant-traits-v2/data/22km/
@@ -32,9 +33,6 @@ data:
       bands: []
 
   targets:
-    gbif:
+    comb:
       use: true
-      traits: [1080]
-    splot:
-      use: false
-      traits: [1080]
+      traits: []

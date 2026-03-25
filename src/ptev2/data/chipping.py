@@ -170,6 +170,10 @@ def _init_zarr_store(
     pred_group = store.require_group("predictors")
     tgt_group = store.require_group("targets")
 
+    # Store band names once on the targets group (all targets share the same band order)
+    first_tgt_srcs = next(iter(all_srcs[n] for n in targets))
+    tgt_group.attrs["band_names"] = list(first_tgt_srcs[0].descriptions)
+
     for name, group, group_name in [
         (n, pred_group, "predictors") for n in predictors
     ] + [(n, tgt_group, "targets") for n in targets]:
@@ -198,22 +202,22 @@ def chip_rasters_to_zarr(
     targets: dict[str, list[Path]],
     output_dir: Path,
     patch_size: int,
-    stride: int,
+    stride_per_split: dict[str, int],
     h3_file: Path,
 ) -> None:
     """Chip predictor and target rasters into one zarr store per split.
 
-    Computes per-chip split labels and a pixel-level split mask from the H3
-    grid, then slides a window of size `patch_size` across all rasters with
-    the given `stride`, routing each chip to the zarr store of its split.
-    Pixels that belong to a different split than the chip are set to NaN.
+    Computes a pixel-level split mask from the H3 grid, then for each split
+    slides a window of size `patch_size` with that split's stride. Every chip
+    touching the split's H3 cells is written to the split's zarr store, with
+    pixels from other splits set to NaN.
 
     Args:
         predictors: Dict mapping predictor name to list of source TIF paths.
         targets: Dict mapping target name to list of source TIF paths.
         output_dir: Directory where split zarr stores will be written.
         patch_size: Side length of each chip in pixels.
-        stride: Step size between consecutive chips in pixels.
+        stride_per_split: Step size per split (e.g. {"train": 10, "val": 10, "test": 15}).
         h3_file: Path to a GeoPackage of H3 hexagonal cells with a "split"
             column used to assign each chip and pixel to a train/val/test split.
     """
@@ -247,151 +251,152 @@ def chip_rasters_to_zarr(
 
     print()
 
-    # compute split labels and pixel mask from H3 grid  TODO: rewrite with our own splits as soon as we have them
     print(f"H3 split cells:\n  {h3_file}")
     h3_gdf = gpd.read_file(h3_file)
 
-    print("Computing chip-level split labels...")
-    split_labels = compute_split_labels(ref.name, patch_size, stride, h3_gdf)
     print("Rasterizing H3 split grid to pixel mask...")
     pixel_split_mask = compute_pixel_split_mask(ref.name, h3_gdf)
 
-    n_cols = math.ceil((width - patch_size) / stride) + 1
-    n_rows = math.ceil((height - patch_size) / stride) + 1
-    n_chips = n_rows * n_cols
-    print(f"Chips: {n_rows} rows × {n_cols} cols = {n_chips} total\n")
-
     output_dir.mkdir(parents=True, exist_ok=True)
     code_to_name = {code: name for name, code in SPLIT_ENCODING.items()}
-    n_per_split = {
-        name: int((split_labels == code).sum()) for name, code in SPLIT_ENCODING.items()
-    }
-    print("Chips per split:")
-    for name, n in n_per_split.items():
-        print(f"  {name}: {n:,}")
-    unknown = int((split_labels == -1).sum())
-    if unknown:
-        print(f"  unknown (skipped): {unknown:,}")
-    print()
 
-    # Pre-allocate one zarr store per split
-    split_arrays = {}
-    split_bounds_arrs = {}
-    for split_name, n_split in n_per_split.items():
-        print(f"Initialising {split_name}.zarr ({n_split:,} chips)...")
-        _, split_arrays[split_name], split_bounds_arrs[split_name] = _init_zarr_store(
-            path=output_dir / f"{split_name}.zarr",
-            n_chips=n_split,
-            split_name=split_name,
-            predictors=predictors,
-            targets=targets,
-            all_srcs=all_srcs,
-            patch_size=patch_size,
-            stride=stride,
-            crs=crs,
-            transform=transform,
-        )
+    # Group splits by stride so we do one pass per unique stride
+    stride_groups: dict[int, list[str]] = {}
+    for split_name in SPLIT_ENCODING:
+        stride_groups.setdefault(stride_per_split[split_name], []).append(split_name)
 
-    # Per-split buffers
-    split_bufs = {
-        split_name: {
-            name: np.empty(
-                (
-                    BUFFER_SIZE,
-                    sum(s.count for s in all_srcs[name]),
-                    patch_size,
-                    patch_size,
-                ),
-                dtype=np.float32,
-            )
-            for name in all_srcs
-        }
-        for split_name in SPLIT_ENCODING
-    }
-    split_bounds_bufs = {
-        split_name: np.empty((BUFFER_SIZE, 4), dtype=np.float64)
-        for split_name in SPLIT_ENCODING
-    }
-    split_buf_pos = {split_name: 0 for split_name in SPLIT_ENCODING}
-    split_buf_start = {split_name: 0 for split_name in SPLIT_ENCODING}
+    for stride, group_splits in stride_groups.items():
+        n_cols = math.ceil((width - patch_size) / stride) + 1
+        n_rows = math.ceil((height - patch_size) / stride) + 1
+        print(f"\nStride={stride} ({', '.join(group_splits)}), grid={n_rows}×{n_cols}")
 
-    def flush(split_name: str, count: int) -> None:
-        start = split_buf_start[split_name]
-        for name in all_srcs:
-            split_arrays[split_name][name][start : start + count] = split_bufs[
-                split_name
-            ][name][:count]
-        split_bounds_arrs[split_name][start : start + count] = split_bounds_bufs[
-            split_name
-        ][:count]
+        # Count chips per split in this group
+        group_codes = {SPLIT_ENCODING[s] for s in group_splits}
+        n_chips_per = {s: 0 for s in group_splits}
+        for row in range(n_rows):
+            for col in range(n_cols):
+                y_px, x_px = row * stride, col * stride
+                window_mask = pixel_split_mask[
+                    y_px : y_px + patch_size, x_px : x_px + patch_size
+                ]
+                for code in np.unique(window_mask):
+                    if code in group_codes:
+                        n_chips_per[code_to_name[code]] += 1
+        for s, n in n_chips_per.items():
+            print(f"  {s}: {n:,} chips")
 
-    print("\nChipping...")
-    chip_global_idx = 0
-    for row in tqdm(range(n_rows), desc="Rows"):
-        for col in range(n_cols):
-            split_code = int(split_labels[chip_global_idx])
-            chip_global_idx += 1
-
-            if split_code not in code_to_name:
-                continue  # unknown — skip
-
-            split_name = code_to_name[split_code]
-            y_px, x_px = row * stride, col * stride
-            window = rasterio.windows.Window(x_px, y_px, patch_size, patch_size)
-
-            # Read chip
-            chip_data = {}
-            for name, srcs in all_srcs.items():
-                chip_data[name] = np.concatenate(
-                    [
-                        src.read(window=window, boundless=True, fill_value=0).astype(
-                            np.float32
-                        )
-                        for src in srcs
-                    ],
-                    axis=0,
+        # Allocate zarr stores and buffers for each split in this group
+        split_arrays = {}
+        split_bounds_arrs = {}
+        for split_name in group_splits:
+            _, split_arrays[split_name], split_bounds_arrs[split_name] = (
+                _init_zarr_store(
+                    path=output_dir / f"{split_name}.zarr",
+                    n_chips=n_chips_per[split_name],
+                    split_name=split_name,
+                    predictors=predictors,
+                    targets=targets,
+                    all_srcs=all_srcs,
+                    patch_size=patch_size,
+                    stride=stride,
+                    crs=crs,
+                    transform=transform,
                 )
+            )
 
-            # Mask pixels that belong to a different split
-            if pixel_split_mask is not None:
+        bufs = {
+            split_name: {
+                name: np.empty(
+                    (
+                        BUFFER_SIZE,
+                        sum(s.count for s in all_srcs[name]),
+                        patch_size,
+                        patch_size,
+                    ),
+                    dtype=np.float32,
+                )
+                for name in all_srcs
+            }
+            for split_name in group_splits
+        }
+        bounds_bufs = {
+            s: np.empty((BUFFER_SIZE, 4), dtype=np.float64) for s in group_splits
+        }
+        buf_pos = {s: 0 for s in group_splits}
+        buf_start = {s: 0 for s in group_splits}
+
+        def flush(split_name: str, count: int) -> None:
+            start = buf_start[split_name]
+            for name in all_srcs:
+                split_arrays[split_name][name][start : start + count] = bufs[
+                    split_name
+                ][name][:count]
+            split_bounds_arrs[split_name][start : start + count] = bounds_bufs[
+                split_name
+            ][:count]
+
+        print("  Chipping...")
+        for row in tqdm(range(n_rows), desc=f"  stride={stride}"):
+            for col in range(n_cols):
+                y_px, x_px = row * stride, col * stride
                 y_end = min(y_px + patch_size, height)
                 x_end = min(x_px + patch_size, width)
                 mask_chip = np.full((patch_size, patch_size), -1, dtype=np.int8)
                 mask_chip[: y_end - y_px, : x_end - x_px] = pixel_split_mask[
                     y_px:y_end, x_px:x_end
                 ]
-                outside = mask_chip != split_code  # (patch_size, patch_size)
-                for name in chip_data:
-                    chip_data[name][:, outside] = np.nan
 
-            buf_pos = split_buf_pos[split_name]
-            for name in all_srcs:
-                split_bufs[split_name][name][buf_pos] = chip_data[name]
+                chip_splits = [
+                    s for s in group_splits if SPLIT_ENCODING[s] in np.unique(mask_chip)
+                ]
+                if not chip_splits:
+                    continue
 
-            win_t = rasterio.windows.transform(window, transform)
-            split_bounds_bufs[split_name][buf_pos] = [
-                win_t.c,
-                win_t.f + patch_size * transform.e,
-                win_t.c + patch_size * transform.a,
-                win_t.f,
-            ]
+                window = rasterio.windows.Window(x_px, y_px, patch_size, patch_size)
 
-            split_buf_pos[split_name] += 1
-            if split_buf_pos[split_name] == BUFFER_SIZE:
-                flush(split_name, BUFFER_SIZE)
-                split_buf_start[split_name] += BUFFER_SIZE
-                split_buf_pos[split_name] = 0
+                # Read rasters once per chip position
+                chip_data = {
+                    name: np.concatenate(
+                        [
+                            src.read(
+                                window=window, boundless=True, fill_value=0
+                            ).astype(np.float32)
+                            for src in srcs
+                        ],
+                        axis=0,
+                    )
+                    for name, srcs in all_srcs.items()
+                }
 
-    # Final flush
-    for split_name in SPLIT_ENCODING:
-        pos = split_buf_pos[split_name]
-        if pos > 0:
-            flush(split_name, pos)
+                win_t = rasterio.windows.transform(window, transform)
+                bounds = [
+                    win_t.c,
+                    win_t.f + patch_size * transform.e,
+                    win_t.c + patch_size * transform.a,
+                    win_t.f,
+                ]
+
+                for split_name in chip_splits:
+                    split_code = SPLIT_ENCODING[split_name]
+                    outside = mask_chip != split_code
+                    pos = buf_pos[split_name]
+                    for name in all_srcs:
+                        chip = chip_data[name].copy()
+                        chip[:, outside] = np.nan
+                        bufs[split_name][name][pos] = chip
+                    bounds_bufs[split_name][pos] = bounds
+                    buf_pos[split_name] += 1
+                    if buf_pos[split_name] == BUFFER_SIZE:
+                        flush(split_name, BUFFER_SIZE)
+                        buf_start[split_name] += BUFFER_SIZE
+                        buf_pos[split_name] = 0
+
+        for split_name in group_splits:
+            if buf_pos[split_name] > 0:
+                flush(split_name, buf_pos[split_name])
 
     for srcs in all_srcs.values():
         for src in srcs:
             src.close()
 
     print(f"\nDone. Splits written to {output_dir}")
-    for split_name, n_split in n_per_split.items():
-        print(f"  {split_name}.zarr: {n_split:,} chips")
