@@ -4,19 +4,23 @@ registry:
   baseline:
     _target_: ptev2.models.baseline.PadarianInspiredPatchCNN
     in_channels: ${data.in_channels}
-    n_traits: ${data.n_traits}
+    out_channels: ${data.n_traits}
     hidden_dim: 64
     dropout_p: 0.3
     head_type: "single"
 
   respatch:
-    _target_: ptev2.models.traitPatchCNN.ResPatchCenterCNN
+    _target_: ptev2.models.traitPatchCNN.ResPatchCNN
     in_channels: ${data.in_channels}
-    n_traits: ${data.n_traits}
+    # Placeholder only. Training/evaluation scripts override this with
+    # selected_trait_count * bands_per_trait.
+    out_channels: 6
+    # Base feature width. Deeper stages use x2 and x4 of this value.
     base_channels: 32
     norm: "gn"
     gn_groups: 8
+    # For patch 15x15: [1, 1, 1, 1]. For patch 25x25: [1, 2, 1, 2].
     stride_blocks: [1, 1, 1, 1]
-    dropout_p: 0.1
+    dropout_p: 0.5
 
 active: ${.registry.${.name}}
