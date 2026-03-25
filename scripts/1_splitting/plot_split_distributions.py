@@ -16,15 +16,17 @@ from rich.progress import track
 from scipy.stats import gaussian_kde
 
 SPLITS_DIR = Path("/scratch3/plant-traits-v2/data/22km/splits")
-GBIF_DIR = Path("/scratch3/plant-traits-v2/data/22km/gbif")
+COMB_DIR = Path("/scratch3/plant-traits-v2/data/22km/targets/comb")
 OUT_DIR = Path(__file__).parents[2] / "viz" / "splits"
 
 H3_RESOLUTION = 2
-SOURCE = "gbif"
+SOURCE = "comb"
 DATA_RES = "22km"
 SPLITS_FILE = SPLITS_DIR / f"h3_splits_res{H3_RESOLUTION}_{SOURCE}_{DATA_RES}.gpkg"
-BANDS = ["mean", "std", "median", "q05", "q95", "count"]
+BANDS = ["mean", "std", "median", "q05", "q95", "source"]
 SPLIT_COLORS = {"train": "#2196F3", "val": "#FF9800", "test": "#4CAF50"}
+
+MAX_TRAITS = None  # TODO: remove to plot all traits
 
 plt.rcParams["font.family"] = "monospace"
 
@@ -44,8 +46,10 @@ def extract_cell_values_all_bands(
             fill=0,
             dtype=np.int32,
         )
+        descriptions = [d.lower() for d in src.descriptions]
         band_data = {}
-        for band_idx, band_name in enumerate(BANDS, start=1):
+        for band_name in BANDS:
+            band_idx = descriptions.index(band_name) + 1
             data = src.read(band_idx).astype(float)
             if src.nodata is not None:
                 data[data == src.nodata] = np.nan
@@ -62,7 +66,7 @@ def plot_trait_row(
     gdf: gpd.GeoDataFrame,
     cell_polys: list,
 ) -> None:
-    raster_path = GBIF_DIR / f"{trait}.tif"
+    raster_path = COMB_DIR / f"{trait}.tif"
     band_cell_values = extract_cell_values_all_bands(raster_path, cell_polys)
 
     for ax, band_name in zip(axes, BANDS):
@@ -72,6 +76,31 @@ def plot_trait_row(
                 split_values[split].append(vals)
 
         pooled = {s: np.concatenate(vs) for s, vs in split_values.items() if vs}
+
+        if band_name == "source":
+            splits = ["train", "val", "test"]
+            x = np.arange(2)
+            width = 0.25
+            for i, split in enumerate(splits):
+                vals = pooled.get(split, np.array([]))
+                if len(vals) == 0:
+                    continue
+                gbif_frac = np.mean(vals == 1)
+                splot_frac = np.mean(vals == 2)
+                ax.bar(
+                    x + i * width,
+                    [gbif_frac, splot_frac],
+                    width,
+                    color=SPLIT_COLORS[split],
+                    alpha=0.8,
+                    label=split,
+                )
+            ax.set_xticks(x + width)
+            ax.set_xticklabels(["GBIF", "SPLOT"])
+            ax.set_ylabel("fraction")
+            ax.set_ylim(0, 1)
+            ax.spines[["top", "right"]].set_visible(False)
+            continue
 
         for split, vals in pooled.items():
             if len(vals) < 2:
@@ -95,9 +124,9 @@ def plot_trait_row(
 
 def main() -> None:
     gdf = gpd.read_file(SPLITS_FILE)
-    traits = sorted(p.stem for p in GBIF_DIR.glob("*.tif"))
+    traits = sorted(p.stem for p in COMB_DIR.glob("*.tif"))[:MAX_TRAITS]
 
-    with rasterio.open(GBIF_DIR / f"{traits[0]}.tif") as src:
+    with rasterio.open(COMB_DIR / f"{traits[0]}.tif") as src:
         raster_crs = src.crs.to_string()
 
     gdf_raster = gdf.to_crs(raster_crs)

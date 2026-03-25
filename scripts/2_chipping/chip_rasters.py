@@ -2,11 +2,12 @@
 
 from pathlib import Path
 
+import geopandas as gpd
 import hydra
-import matplotlib.pyplot as plt
-from omegaconf import DictConfig, OmegaConf
+import zarr
+from omegaconf import DictConfig
 from rich.console import Console
-from rich.pretty import Pretty
+from shapely.geometry import box
 
 from ptev2.data.chipping import chip_rasters_to_zarr
 
@@ -28,6 +29,8 @@ def main(cfg: DictConfig) -> None:
     # chipping settings
     patch_size = cfg.settings.patch_size
     stride = cfg.settings.stride
+    stride_test = cfg.settings.get("stride_test", patch_size)
+    stride_per_split = {"train": stride, "val": stride, "test": stride_test}
 
     # get predictors and targets to use
     used_predictors = {
@@ -67,7 +70,8 @@ def main(cfg: DictConfig) -> None:
 
     console.print("[bold]Chipping settings:[/bold]")
     console.print(f"Patch size:        [cyan]{patch_size}[/cyan] px")
-    console.print(f"Stride:            [cyan]{stride}[/cyan] px")
+    console.print(f"Stride train/val:  [cyan]{stride}[/cyan] px")
+    console.print(f"Stride test:       [cyan]{stride_test}[/cyan] px")
 
     console.rule()
 
@@ -95,9 +99,28 @@ def main(cfg: DictConfig) -> None:
         targets=target_paths,
         output_dir=output_dir,
         patch_size=patch_size,
-        stride=stride,
+        stride_per_split=stride_per_split,
         h3_file=splits_file,
     )
+
+    # Export chip bounds to GeoPackage for inspection
+    gpkg_dir = output_dir / "gpkg"
+    gpkg_dir.mkdir(parents=True, exist_ok=True)
+    console.print("\n[bold]Exporting chip bounds to GeoPackage...[/bold]")
+    for zarr_path in sorted(output_dir.glob("*.zarr")):
+        split = zarr_path.stem
+        z = zarr.open_group(str(zarr_path), mode="r")
+        bounds = z["bounds"][:]
+        gdf = gpd.GeoDataFrame(
+            {"chip_id": range(len(bounds))},
+            geometry=[
+                box(min_x, min_y, max_x, max_y) for min_x, min_y, max_x, max_y in bounds
+            ],
+            crs="EPSG:6933",
+        )
+        out_path = gpkg_dir / f"{split}.gpkg"
+        gdf.to_file(out_path, driver="GPKG")
+        console.print(f"  [cyan]{out_path}[/cyan] ({len(gdf):,} chips)")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ wandb/
 data/**
 !data/**/
 !data/**/README.md
+viz/chips/
 
 # QGIS
 qgis/
