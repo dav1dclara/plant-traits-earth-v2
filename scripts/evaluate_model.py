@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 import hydra
@@ -14,19 +15,10 @@ from ptev2.metrics.aoa import collect_patch_features, compute_aoa_metrics
 from ptev2.metrics.core import pearson_r as pearson_r_metric
 from ptev2.metrics.core import r2_score
 from ptev2.utils import (
+    checkpoint_paths_from_cfg,
     run_name_from_cfg,
     seed_all,
 )
-
-
-def _band_names_for_source(source: str, bands_per_trait: int) -> list[str]:
-    source_l = source.lower()
-    if bands_per_trait == 6:
-        if source_l == "gbif":
-            return ["mean", "std", "median", "q05", "q95", "count"]
-        if source_l == "splot":
-            return ["mean", "count", "std", "median", "q05", "q95"]
-    return [f"band{i}" for i in range(1, bands_per_trait + 1)]
 
 
 def _infer_checkpoint_output_channels(
@@ -39,6 +31,90 @@ def _infer_checkpoint_output_channels(
         if key.endswith("head.weight") and tensor.ndim >= 1:
             return int(tensor.shape[0])
     return None
+
+
+def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
+    checkpoint_override = cfg.evaluation.checkpoint_path
+    if checkpoint_override:
+        return Path(str(checkpoint_override))
+
+    best_path, last_path = checkpoint_paths_from_cfg(cfg)
+    if best_path.exists():
+        return best_path
+    return last_path
+
+
+def _target_layout_from_cfg(
+    cfg: DictConfig,
+) -> tuple[int, list[str], list[int], list[int]]:
+    target_cfg = cfg.training.data.target
+    available_statistics = [str(v) for v in target_cfg.available_statistics]
+    selected_statistics = [str(v) for v in target_cfg.selected_statistics]
+    source_statistic = str(target_cfg.source_statistic)
+
+    if not available_statistics:
+        raise ValueError("training.data.target.available_statistics must not be empty.")
+    if not selected_statistics:
+        raise ValueError("training.data.target.selected_statistics must not be empty.")
+    if source_statistic not in available_statistics:
+        raise ValueError(
+            f"source_statistic='{source_statistic}' not in {available_statistics}"
+        )
+
+    selected_trait_ids = (
+        [int(v) for v in target_cfg.trait_ids] if target_cfg.trait_ids else []
+    )
+    n_traits = (
+        len(selected_trait_ids) if selected_trait_ids else int(target_cfg.n_traits)
+    )
+    if n_traits <= 0:
+        raise ValueError("training.data.target.n_traits must be > 0.")
+
+    stats_per_trait = len(available_statistics)
+    stat_to_idx = {name: idx for idx, name in enumerate(available_statistics)}
+    target_indices: list[int] = []
+    source_indices: list[int] = []
+    for trait_pos in range(n_traits):
+        for stat_name in selected_statistics:
+            target_indices.append(trait_pos * stats_per_trait + stat_to_idx[stat_name])
+        source_indices.append(
+            trait_pos * stats_per_trait + stat_to_idx[source_statistic]
+        )
+
+    return n_traits, selected_statistics, target_indices, source_indices
+
+
+def _source_mask_nodata_values(cfg: DictConfig) -> list[int]:
+    raw = cfg.training.data.target.source_mask_nodata_values
+    if raw is None:
+        return []
+    if isinstance(raw, (int, str)):
+        return [int(raw)]
+    return [int(v) for v in raw]
+
+
+def _split_target_and_source(
+    y_full: torch.Tensor,
+    target_indices: list[int],
+    source_indices: list[int],
+    nodata_values: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if y_full.ndim != 4:
+        raise ValueError(
+            f"Expected y_full shape (B, C, H, W), got {tuple(y_full.shape)}"
+        )
+
+    y_target = y_full[:, target_indices]
+    source_mask = (
+        torch.nan_to_num(y_full[:, source_indices], nan=0.0).round().to(torch.int64)
+    )
+    for nodata_value in nodata_values:
+        source_mask = torch.where(
+            source_mask == nodata_value,
+            torch.zeros_like(source_mask),
+            source_mask,
+        )
+    return y_target, source_mask
 
 
 def evaluate_model(cfg: DictConfig) -> dict:
@@ -69,67 +145,42 @@ def evaluate_model(cfg: DictConfig) -> dict:
     if not predictors:
         raise ValueError("No predictors enabled in cfg.training.data.predictors.")
 
-    target = cfg.training.data.target.source
-    zarr_dir = Path(cfg.training.data.zarr_dir)
-    batch_size = int(cfg.training.data_loaders.batch_size)
-    num_workers = int(cfg.training.data_loaders.num_workers)
-    test_split = str(cfg.training.data.test_split)
-
-    trait_ids_cfg = OmegaConf.select(cfg, "training.data.target.trait_ids")
-    trait_positions_cfg = OmegaConf.select(cfg, "training.data.target.trait_positions")
-    bands_per_trait = int(
-        OmegaConf.select(cfg, "training.data.target.bands_per_trait", default=6)
+    n_traits, selected_statistics, target_channel_indices, source_indices = (
+        _target_layout_from_cfg(cfg)
     )
-
-    selected_trait_ids = (
-        [int(trait_ids_cfg)]
-        if isinstance(trait_ids_cfg, (str, int))
-        else [int(t) for t in trait_ids_cfg]
-    )
-    trait_positions = (
-        [int(trait_positions_cfg)]
-        if isinstance(trait_positions_cfg, int)
-        else [int(p) for p in trait_positions_cfg]
-    )
-    if len(selected_trait_ids) != len(trait_positions):
-        raise ValueError(
-            "training.data.target.trait_ids und trait_positions muessen gleich lang sein."
-        )
-
-    target_channel_indices: list[int] = []
-    for pos in trait_positions:
-        start = pos * bands_per_trait
-        target_channel_indices.extend(range(start, start + bands_per_trait))
-
-    selected_trait_count = len(selected_trait_ids)
-    effective_target_channels = len(target_channel_indices)
-    band_names = _band_names_for_source(target, bands_per_trait)
-
     print(
         "Target layout: "
-        f"traits={selected_trait_count}, "
-        f"bands_per_trait={bands_per_trait}, "
-        f"output_channels={effective_target_channels}"
+        f"traits={n_traits}, "
+        f"selected_statistics={selected_statistics}, "
+        f"output_channels={len(target_channel_indices)}"
     )
-    print(f"Band order ({target}): {band_names}")
+
+    mask_nodata_values = _source_mask_nodata_values(cfg)
+
+    zarr_dir = Path(cfg.training.data.zarr_dir)
+    test_zarr_dir_cfg = cfg.evaluation.test_zarr_dir
+    test_zarr_dir = Path(str(test_zarr_dir_cfg)) if test_zarr_dir_cfg else zarr_dir
+    batch_size = int(cfg.training.data_loaders.batch_size)
+    num_workers = int(cfg.training.data_loaders.num_workers)
+    test_split = str(cfg.evaluation.test_split)
 
     test_loader = get_dataloader(
-        zarr_dir=zarr_dir,
+        zarr_dir=test_zarr_dir,
         split=test_split,
         predictors=predictors,
-        target=target,
+        target=str(cfg.training.data.target.source),
         batch_size=batch_size,
         num_workers=num_workers,
     )
 
-    compute_aoa = bool(OmegaConf.select(cfg, "evaluation.compute_aoa", default=True))
+    compute_aoa = bool(cfg.evaluation.compute_aoa)
     aoa_metrics = None
     if compute_aoa:
         train_loader = get_dataloader(
             zarr_dir=zarr_dir,
-            split=cfg.training.data.train_split,
+            split=str(cfg.training.data.train_split),
             predictors=predictors,
-            target=target,
+            target=str(cfg.training.data.target.source),
             batch_size=batch_size,
             num_workers=num_workers,
         )
@@ -137,13 +188,7 @@ def evaluate_model(cfg: DictConfig) -> dict:
         test_features = collect_patch_features(test_loader, device=device)
         aoa_metrics = compute_aoa_metrics(train_features, test_features, q=0.95)
 
-    checkpoint_override = OmegaConf.select(cfg, "evaluation.checkpoint_path")
-    if checkpoint_override:
-        checkpoint_path = Path(str(checkpoint_override))
-    else:
-        checkpoint_path = (
-            Path(cfg.training.checkpoint.dir) / f"{run_name_from_cfg(cfg)}.pth"
-        )
+    checkpoint_path = _resolve_checkpoint_path(cfg)
     if not checkpoint_path.exists():
         raise FileNotFoundError(
             f"Checkpoint not found: {checkpoint_path}. "
@@ -159,39 +204,39 @@ def evaluate_model(cfg: DictConfig) -> dict:
         state = state["state_dict"]
 
     checkpoint_output_channels = _infer_checkpoint_output_channels(state)
-    if (
-        checkpoint_output_channels is not None
-        and checkpoint_output_channels != effective_target_channels
+    if checkpoint_output_channels is not None and checkpoint_output_channels != len(
+        target_channel_indices
     ):
         raise ValueError(
             "Checkpoint/model channel mismatch: "
             f"checkpoint_output_channels={checkpoint_output_channels}, "
-            f"expected_output_channels={effective_target_channels}."
+            f"expected_output_channels={len(target_channel_indices)}."
         )
 
-    model = instantiate(cfg.models.active, out_channels=effective_target_channels).to(
+    model = instantiate(cfg.models.active, out_channels=len(target_channel_indices)).to(
         device
     )
     model.load_state_dict(state)
-
     model.eval()
+
     all_y_true: list[np.ndarray] = []
     all_y_pred: list[np.ndarray] = []
     skipped_batches = 0
 
+    splot_code = int(cfg.data.source_mask_encoding.splot)
+    splot_sqerr_sum = 0.0
+    splot_count = 0
+
     with torch.no_grad():
-        for X, y in tqdm(test_loader, desc=f"Evaluating [{test_split}]"):
+        for X, y_full in tqdm(test_loader, desc=f"Evaluating [{test_split}]"):
             X = torch.nan_to_num(X.to(device=device, dtype=torch.float32))
-            y = y.to(device=device, dtype=torch.float32)
-
-            y = y[:, target_channel_indices]
-
-            valid_samples = torch.isfinite(y).any(dim=(1, 2, 3))
-            if not bool(valid_samples.any()):
-                skipped_batches += 1
-                continue
-            X = X[valid_samples]
-            y = y[valid_samples]
+            y_full = y_full.to(device=device, dtype=torch.float32)
+            y, source_mask = _split_target_and_source(
+                y_full=y_full,
+                target_indices=target_channel_indices,
+                source_indices=source_indices,
+                nodata_values=mask_nodata_values,
+            )
 
             y_pred = model(X)
             if y_pred.shape != y.shape:
@@ -199,7 +244,7 @@ def evaluate_model(cfg: DictConfig) -> dict:
                     f"Shape mismatch: y_pred={tuple(y_pred.shape)} vs y={tuple(y.shape)}"
                 )
 
-            valid = torch.isfinite(y_pred) & torch.isfinite(y)
+            valid = torch.isfinite(y_pred) & torch.isfinite(y) & (source_mask > 0)
             if not bool(valid.any()):
                 skipped_batches += 1
                 continue
@@ -207,17 +252,28 @@ def evaluate_model(cfg: DictConfig) -> dict:
             all_y_pred.append(y_pred[valid].detach().cpu().numpy())
             all_y_true.append(y[valid].detach().cpu().numpy())
 
+            valid_splot = (
+                torch.isfinite(y_pred) & torch.isfinite(y) & (source_mask == splot_code)
+            )
+            if bool(valid_splot.any()):
+                diff = y_pred - y
+                splot_sqerr_sum += float(diff[valid_splot].pow(2).sum().item())
+                splot_count += int(valid_splot.sum().item())
+
     if all_y_true:
         y_true_vec = np.concatenate(all_y_true)
         y_pred_vec = np.concatenate(all_y_pred)
         n_valid = int(y_true_vec.size)
-
         r2 = float(r2_score(y_true_vec, y_pred_vec))
         pearson_r = float(pearson_r_metric(y_true_vec, y_pred_vec))
     else:
         n_valid = 0
         r2 = float("nan")
         pearson_r = float("nan")
+
+    rmse_splot_overall = (
+        math.sqrt(splot_sqerr_sum / splot_count) if splot_count > 0 else float("nan")
+    )
 
     results = {
         "checkpoint": str(checkpoint_path),
@@ -227,11 +283,13 @@ def evaluate_model(cfg: DictConfig) -> dict:
         "skipped_batches": skipped_batches,
         "r2": r2,
         "pearson_r": pearson_r,
+        "rmse_splot_overall": rmse_splot_overall,
+        "n_splot_valid": int(splot_count),
     }
     if aoa_metrics is not None:
         results.update(aoa_metrics)
 
-    output_path_cfg = OmegaConf.select(cfg, "evaluation.output_path")
+    output_path_cfg = cfg.evaluation.output_path
     output_path = (
         Path(str(output_path_cfg))
         if output_path_cfg
@@ -243,13 +301,13 @@ def evaluate_model(cfg: DictConfig) -> dict:
 
     print("Evaluation finished")
     print(f"  checkpoint: {checkpoint_path}")
+    print(f"  train_zarr:  {zarr_dir}")
+    print(f"  test_zarr:   {test_zarr_dir}")
     print(f"  split:      {test_split}")
     print(f"  n_valid:    {n_valid}")
     print(f"  r2:         {r2:.6f}")
     print(f"  pearson_r:  {pearson_r:.6f}")
-    if aoa_metrics is not None:
-        print(f"  aoa_cover:  {aoa_metrics['aoa_coverage']:.6f}")
-        print(f"  aoa_thr:    {aoa_metrics['aoa_threshold']:.6f}")
+    print(f"  rmse_splot: {rmse_splot_overall:.6f}")
     print(f"  metrics:    {output_path}")
 
     if run is not None:

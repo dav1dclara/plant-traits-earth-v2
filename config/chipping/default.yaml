@@ -13,8 +13,8 @@ settings:
   stride_test: 25   # test: non-overlapping (= patch_size)
 
 data:
-  root_dir: /scratch3/plant-traits-v2/data/22km/
-  predictors_dir: /scratch3/plant-traits-v2/data/22km/eo_data_processed/
+  root_dir: ${paths.data_root_dir}/22km/
+  predictors_dir: ${paths.data_root_dir}/22km/eo_data_processed/
   predictors:
     canopy_height:
       use: true

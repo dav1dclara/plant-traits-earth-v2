@@ -12,8 +12,8 @@ registry:
   respatch:
     _target_: ptev2.models.traitPatchCNN.ResPatchCNN
     in_channels: ${data.in_channels}
-    # Placeholder only. Training/evaluation scripts override this with
-    # selected_trait_count * bands_per_trait.
+    # Placeholder only. Training/evaluation scripts override this with:
+    # selected_trait_count * selected_statistics_count.
     out_channels: 6
     # Base feature width. Deeper stages use x2 and x4 of this value.
     base_channels: 32

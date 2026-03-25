@@ -1,4 +1,5 @@
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -24,3 +25,25 @@ def run_name_from_cfg(cfg: DictConfig) -> str:
         f"{loss_name}_"
         f"seed{cfg.training.seed}"
     )
+
+
+def checkpoint_paths_from_cfg(
+    cfg: DictConfig,
+    run_name: str | None = None,
+) -> tuple[Path, Path]:
+    if run_name is None:
+        run_name = run_name_from_cfg(cfg)
+
+    checkpoint_dir_cfg = OmegaConf.select(cfg, "training.checkpoint.dir")
+    checkpoint_dir = (
+        Path(str(checkpoint_dir_cfg))
+        if checkpoint_dir_cfg
+        else Path.cwd() / "checkpoints"
+    )
+
+    best_filename = OmegaConf.select(cfg, "training.checkpoint.best_filename")
+    last_filename = OmegaConf.select(cfg, "training.checkpoint.last_filename")
+    best_name = str(best_filename) if best_filename else f"{run_name}_best.pth"
+    last_name = str(last_filename) if last_filename else f"{run_name}.pth"
+
+    return checkpoint_dir / best_name, checkpoint_dir / last_name
