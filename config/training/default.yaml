@@ -1,1 +1,86 @@
-# Training hyperparameters (epochs, lr, batch size, patch size, ...)
+data:
+  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips/patch15_stride10 # TODO: make more flexible
+  train_split: train
+  val_split: val
+  test_split: test
+  targets:
+    source: comb
+    source_statistic: source
+    source_encoding:
+      gbif: 1
+      splot: 2
+      # TODO: nodata (nan)
+    source_mask_nodata_values:
+      - ${data.source_mask_encoding.raster_nodata}
+    n_traits: 37
+    # Empty means: all traits in positional order 0..n_traits-1.
+    trait_ids: []
+    # Full statistics order in the source tensor for each trait.
+    available_statistics: [mean, std, median, q05, q95, count, source]
+    # Baseline supervision uses mean only.
+    selected_statistics: [mean]
+  predictors:
+    in_channels: 150
+    canopy_height:
+      use: true
+    modis:
+      use: true
+    soil_grids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
+
+data_loaders:
+  patch_size: 15
+  stride: 10
+  batch_size: 64
+  num_workers: 8
+
+
+train:
+  seed: 0 # Random seed for reproducibility.
+  epochs: 50
+  run_name: null
+
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0
+
+  loss:
+    _target_: ptev2.loss.WeightedMaskedDenseLoss
+    error_type: mse
+    huber_delta: 1.0
+    w_gbif: 1.0
+    w_splot: 2.0
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 1e-3
+    weight_decay: 1e-4
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.StepLR
+    step_size: 5
+    gamma: 0.5
+
+  scheduler_step:
+    mode: epoch
+    metric: val_rmse_splot_overall
+
+  gradient_clip_norm: null
+
+  logging:
+    log_val_mae_splot: true
+
+checkpoint:
+  save_model: true
+  dir: ${paths.models_dir}
+  # If null, defaults to "<run_name>_best.pth".
+  best_filename: null
+  # If null, defaults to "<run_name>.pth" (latest epoch).
+  last_filename: null
+  monitor_metric: val_rmse_splot_overall
+  monitor_mode: min

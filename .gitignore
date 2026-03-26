@@ -1,16 +1,21 @@
 *.egg-info
 .DS_Store
-__pycache__/
+*__pycache__/
 outputs/
-wandb/
+/wandb/
+.vscode/
 
 # Data
 data/**
 !data/**/
 !data/**/README.md
+viz/chips/
 
 # QGIS
 qgis/
 
 # Claude
 .claude/
+
+# temp code
+scripts/__temp_david/

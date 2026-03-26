@@ -11,3 +11,7 @@ where = ["src"]
 
 [tool.ruff]
 extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["I"]
+ignore = ["F841"]

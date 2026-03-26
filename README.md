@@ -28,30 +28,32 @@ Install the pre-commit hooks for automatic code formatting and linting on each c
 pre-commit install
 ```
 
-
 ## Project structure
 
-```bash
-.
-├── configs
-├── data
-│   └── inputs_processed
-│       ├── eo_data
-│       ├── gbif
-│       ├── splot
-│       ├── README.md
-│       └── trait_mapping.json
-├── notebooks
-│   └── 0-data_exploration
-│       ├── 0.1-earth_observation
-│       ├── 0.2-gbif
-│       └── 0.3-splot
-├── scripts
-├── src
-│   └── __init__.py
-├── .gitignore
-├── .pre-commit-config.yaml
-├── README.md
-├── pyproject.toml
-└── requirements.txt
+*(create a tree at the end of the project)*
+
+## Data preparation
+
+*(write about data preparation...)*
+
+### Splitting
+
+To split ..., run:
+
+```python
+python scripts/splitting/create_splits.py
 ```
+
+### Data chipping
+
+To chip predictor and target raster data into per-split [Zarr](https://zarr.dev/) stores, run:
+
+```python
+python scripts/chipping/chip_rasters.py
+```
+
+The script slides a window of `patch_size × patch_size` pixels across all rasters with a given `stride`, producing one chip per position. Each chip is routed to `train`, `val`, or `test` based on which H3 hexagonal cell its center falls in. Pixels within a chip that belong to a different split are masked to `NaN` to prevent data leakage across boundaries. The output is one zarr store per split (e.g. `train.zarr`). Each store contains two groups — `predictors/` and `targets/` — with arrays of shape `(n_chips, n_bands, patch_size, patch_size)`, plus a `bounds` array with the geographic bounding box of each chip.
+
+Patch size, stride, data paths, and which predictors/targets to include are controlled via `config/chipping/default.yaml`.
+
+## Model training
