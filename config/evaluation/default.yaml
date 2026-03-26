@@ -1,0 +1,5 @@
+compute_aoa: true
+checkpoint_path: null
+output_path: null
+test_zarr_dir: null
+test_split: ${training.data.test_split}

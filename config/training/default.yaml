@@ -1,23 +1,39 @@
-seed: 0 # Random seed for reproducibility, change to a different value for a different random seed.
+seed: 0 # Random seed for reproducibility.
 epochs: 50
 run_name: null
 
 checkpoint:
   save_model: true
   dir: ${paths.models_dir}
+  # If null, defaults to "<run_name>_best.pth".
+  best_filename: null
+  # If null, defaults to "<run_name>.pth" (latest epoch).
+  last_filename: null
+  monitor_metric: val_rmse_splot_overall
+  monitor_mode: min
+
+early_stopping:
+  enabled: true
+  patience: 10
+  min_delta: 0.0
 
 data:
-  zarr_dir: /scratch3/plant-traits-v2/data/chips/22km/patch15_stride10/
+  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips/patch15_stride10
   train_split: train
   val_split: val
   test_split: test
   target:
-    source: gbif
-    trait_ids: [1080]
-    # Position each trait in the stacked target tensor (0-based).
-    # Example: trait 1080 is currently stored at position 0.
-    trait_positions: [0]
-    bands_per_trait: 6
+    source: comb
+    source_statistic: source
+    source_mask_nodata_values:
+      - ${data.source_mask_encoding.raster_nodata}
+    n_traits: ${data.n_traits}
+    # Empty means: all traits in positional order 0..n_traits-1.
+    trait_ids: []
+    # Full statistics order in the source tensor for each trait.
+    available_statistics: [mean, std, median, q05, q95, count, source]
+    # Baseline supervision uses mean only.
+    selected_statistics: [mean]
   predictors:
     canopy_height:
       use: true
@@ -31,12 +47,15 @@ data:
       use: true
 
 data_loaders:
-  batch_size: ${data.batch_size}
+  batch_size: 64
   num_workers: 8
 
 loss:
-  _target_: ptev2.loss.MaskedMSELoss
-  reduction: mean
+  _target_: ptev2.loss.WeightedMaskedDenseLoss
+  error_type: mse
+  huber_delta: 1.0
+  w_gbif: 1.0
+  w_splot: 2.0
 
 optimizer:
   _target_: torch.optim.Adam
@@ -47,3 +66,12 @@ scheduler:
   _target_: torch.optim.lr_scheduler.StepLR
   step_size: 5
   gamma: 0.5
+
+scheduler_step:
+  mode: epoch
+  metric: val_rmse_splot_overall
+
+gradient_clip_norm: null
+
+logging:
+  log_val_mae_splot: true

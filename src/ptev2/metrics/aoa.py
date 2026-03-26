@@ -19,7 +19,8 @@ def channelwise_patch_mean(x: torch.Tensor) -> torch.Tensor:
 def collect_patch_features(loader, device: torch.device) -> torch.Tensor:
     features: list[torch.Tensor] = []
     with torch.no_grad():
-        for X, _ in tqdm(loader, desc="Collecting AoA features"):
+        for batch in tqdm(loader, desc="Collecting AoA features"):
+            X = batch[0]
             X = X.to(device=device, dtype=torch.float32)
             features.append(channelwise_patch_mean(X).cpu())
     if not features:

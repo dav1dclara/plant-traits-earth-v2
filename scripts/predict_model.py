@@ -5,34 +5,19 @@ import numpy as np
 import rasterio
 import torch
 from hydra.utils import instantiate
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from rasterio.windows import Window
 from tqdm import tqdm
 
-from ptev2.utils import run_name_from_cfg, seed_all
-
-
-def _get_selected_trait_ids(cfg: DictConfig) -> list[int]:
-    trait_ids_cfg = OmegaConf.select(cfg, "training.data.target.trait_ids")
-    if trait_ids_cfg is None:
-        raise ValueError("training.data.target.trait_ids must be set.")
-    if isinstance(trait_ids_cfg, (int, str)):
-        return [int(trait_ids_cfg)]
-    return [int(t) for t in trait_ids_cfg]
-
-
-def _band_names_for_source(source: str, bands_per_trait: int) -> list[str]:
-    source_l = source.lower()
-    if bands_per_trait == 6:
-        if source_l == "gbif":
-            return ["mean", "std", "median", "q05", "q95", "count"]
-        if source_l == "splot":
-            return ["mean", "count", "std", "median", "q05", "q95"]
-    return [f"band{i}" for i in range(1, bands_per_trait + 1)]
+from ptev2.utils import (
+    checkpoint_paths_from_cfg,
+    run_name_from_cfg,
+    seed_all,
+)
 
 
 def _list_predictor_files(cfg: DictConfig) -> list[Path]:
-    predictors_root_cfg = OmegaConf.select(cfg, "prediction.predictors_dir")
+    predictors_root_cfg = cfg.prediction.predictors_dir
     if predictors_root_cfg:
         predictors_root = Path(str(predictors_root_cfg))
     else:
@@ -56,8 +41,8 @@ def _list_predictor_files(cfg: DictConfig) -> list[Path]:
     return predictor_files
 
 
-def _resolve_reference_tif(cfg: DictConfig, first_trait_id: int) -> Path:
-    explicit = OmegaConf.select(cfg, "prediction.reference_tif")
+def _resolve_reference_tif(cfg: DictConfig) -> Path:
+    explicit = cfg.prediction.reference_tif
     if explicit:
         ref = Path(str(explicit))
         if not ref.exists():
@@ -65,24 +50,10 @@ def _resolve_reference_tif(cfg: DictConfig, first_trait_id: int) -> Path:
         return ref
 
     target_source = str(cfg.training.data.target.source)
-
-    candidates = [
-        Path(cfg.paths.data_root_dir)
-        / "22km"
-        / target_source
-        / f"X{first_trait_id}.tif",
-        Path(cfg.paths.data_root_dir)
-        / "22km"
-        / "gbif_original"
-        / f"X{first_trait_id}.tif",
-        Path(cfg.paths.data_root_dir)
-        / "22km"
-        / "gbif_original"
-        / f"X{first_trait_id}_original.tif",
-    ]
-    for path in candidates:
-        if path.exists():
-            return path
+    source_dir = Path(cfg.paths.data_root_dir) / "22km" / target_source
+    candidates = sorted(source_dir.glob("X*.tif"))
+    if candidates:
+        return candidates[0]
 
     raise FileNotFoundError(
         "Could not find a default reference tif. "
@@ -91,10 +62,13 @@ def _resolve_reference_tif(cfg: DictConfig, first_trait_id: int) -> Path:
 
 
 def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
-    checkpoint_override = OmegaConf.select(cfg, "prediction.checkpoint_path")
+    checkpoint_override = cfg.prediction.checkpoint_path
     if checkpoint_override:
         return Path(str(checkpoint_override))
-    return Path(cfg.training.checkpoint.dir) / f"{run_name_from_cfg(cfg)}.pth"
+    best_path, last_path = checkpoint_paths_from_cfg(cfg)
+    if best_path.exists():
+        return best_path
+    return last_path
 
 
 def _infer_checkpoint_output_channels(
@@ -132,6 +106,32 @@ def _validate_grids(
     return total_bands
 
 
+def _target_layout_from_cfg(
+    cfg: DictConfig,
+) -> tuple[int, list[str], int, list[str]]:
+    target_cfg = cfg.training.data.target
+    selected_statistics = [str(v) for v in target_cfg.selected_statistics]
+    if not selected_statistics:
+        raise ValueError("training.data.target.selected_statistics must not be empty.")
+
+    selected_trait_ids = (
+        [int(v) for v in target_cfg.trait_ids] if target_cfg.trait_ids else []
+    )
+    n_traits = (
+        len(selected_trait_ids) if selected_trait_ids else int(target_cfg.n_traits)
+    )
+    if n_traits <= 0:
+        raise ValueError("training.data.target.n_traits must be > 0.")
+
+    if selected_trait_ids and len(selected_trait_ids) == n_traits:
+        trait_labels = [f"X{tid}" for tid in selected_trait_ids]
+    else:
+        trait_labels = [f"trait_{idx:03d}" for idx in range(n_traits)]
+
+    out_channels = n_traits * len(selected_statistics)
+    return n_traits, selected_statistics, out_channels, trait_labels
+
+
 def predict_global(cfg: DictConfig) -> Path:
     seed_all(cfg.training.seed)
 
@@ -139,20 +139,14 @@ def predict_global(cfg: DictConfig) -> Path:
         raise RuntimeError("CUDA ist erforderlich, aber nicht verfuegbar.")
     device = torch.device("cuda")
 
-    trait_ids = _get_selected_trait_ids(cfg)
-    target_source = str(cfg.training.data.target.source)
-    bands_per_trait = int(
-        OmegaConf.select(cfg, "training.data.target.bands_per_trait", default=6)
-    )
-    out_channels = len(trait_ids) * bands_per_trait
-    band_names = _band_names_for_source(target_source, bands_per_trait)
+    n_traits, band_names, out_channels, trait_labels = _target_layout_from_cfg(cfg)
 
     patch_h = int(cfg.data.patch_h)
     patch_w = int(cfg.data.patch_w)
     if patch_h != patch_w:
         raise ValueError(f"Only square patches are supported, got {patch_h}x{patch_w}.")
 
-    halo_cfg = OmegaConf.select(cfg, "prediction.halo")
+    halo_cfg = cfg.prediction.halo
     min_safe_halo = patch_h // 2 + 1
     halo = int(halo_cfg) if halo_cfg is not None else min_safe_halo
     if halo < min_safe_halo:
@@ -160,19 +154,15 @@ def predict_global(cfg: DictConfig) -> Path:
             f"prediction.halo={halo} is too small for patch size {patch_h}. "
             f"Use halo >= {min_safe_halo} to avoid seam artifacts."
         )
-    tile_size = int(OmegaConf.select(cfg, "prediction.tile_size", default=256))
+    tile_size = int(cfg.prediction.tile_size)
     if tile_size < 1:
         raise ValueError(f"prediction.tile_size must be >= 1, got {tile_size}")
 
-    apply_predictor_valid_mask = bool(
-        OmegaConf.select(cfg, "prediction.apply_predictor_valid_mask", default=True)
-    )
-    apply_reference_mask = bool(
-        OmegaConf.select(cfg, "prediction.apply_reference_mask", default=True)
-    )
+    apply_predictor_valid_mask = bool(cfg.prediction.apply_predictor_valid_mask)
+    apply_reference_mask = bool(cfg.prediction.apply_reference_mask)
 
     predictor_files = _list_predictor_files(cfg)
-    reference_tif = _resolve_reference_tif(cfg, trait_ids[0])
+    reference_tif = _resolve_reference_tif(cfg)
 
     checkpoint_path = _resolve_checkpoint_path(cfg)
     if not checkpoint_path.exists():
@@ -226,7 +216,7 @@ def predict_global(cfg: DictConfig) -> Path:
         n_rows = (height + tile_size - 1) // tile_size
         n_cols = (width + tile_size - 1) // tile_size
         n_tiles = n_rows * n_cols
-        max_tiles_cfg = OmegaConf.select(cfg, "prediction.max_tiles")
+        max_tiles_cfg = cfg.prediction.max_tiles
         max_tiles = int(max_tiles_cfg) if max_tiles_cfg is not None else n_tiles
         n_tiles_to_run = min(n_tiles, max_tiles)
 
@@ -288,7 +278,7 @@ def predict_global(cfg: DictConfig) -> Path:
             for src in srcs:
                 src.close()
 
-        output_cfg = OmegaConf.select(cfg, "prediction.output_tif")
+        output_cfg = cfg.prediction.output_tif
         if output_cfg:
             output_tif = Path(str(output_cfg))
         else:
@@ -314,9 +304,9 @@ def predict_global(cfg: DictConfig) -> Path:
             dst.write(predictions)
 
             band_idx = 1
-            for trait_id in trait_ids:
+            for trait_label in trait_labels:
                 for semantic in band_names:
-                    dst.set_band_description(band_idx, f"X{trait_id}_{semantic}")
+                    dst.set_band_description(band_idx, f"{trait_label}_{semantic}")
                     band_idx += 1
 
     print("Prediction finished")
@@ -324,6 +314,7 @@ def predict_global(cfg: DictConfig) -> Path:
     print(f"  reference:  {reference_tif}")
     print(f"  output:     {output_tif}")
     print(f"  shape:      ({out_channels}, {height}, {width})")
+    print(f"  n_traits:   {n_traits}")
     print(f"  band_order: {band_names}")
     print(
         "  masks:      "
