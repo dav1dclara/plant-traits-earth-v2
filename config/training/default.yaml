@@ -1,5 +1,6 @@
 data:
   zarr_dir: /scratch3/plant-traits-v2/data/22km/chips/patch15_stride10 # TODO: make more flexible
+  in_channels: 150
   train_split: train
   val_split: val
   test_split: test
@@ -7,11 +8,9 @@ data:
     source: comb
     source_statistic: source
     source_encoding:
+      raster_nodata: .nan
       gbif: 1
       splot: 2
-      # TODO: nodata (nan)
-    source_mask_nodata_values:
-      - ${data.source_mask_encoding.raster_nodata}
     n_traits: 37
     # Empty means: all traits in positional order 0..n_traits-1.
     trait_ids: []
@@ -20,7 +19,6 @@ data:
     # Baseline supervision uses mean only.
     selected_statistics: [mean]
   predictors:
-    in_channels: 150
     canopy_height:
       use: true
     modis:
@@ -35,42 +33,42 @@ data:
 data_loaders:
   patch_size: 15
   stride: 10
-  batch_size: 64
-  num_workers: 8
+  batch_size: 32
+  num_workers: 4
 
 
 train:
   seed: 0 # Random seed for reproducibility.
-  epochs: 50
+  epochs: 60
   run_name: null
 
   early_stopping:
     enabled: true
-    patience: 10
+    patience: 15
     min_delta: 0.0
 
   loss:
     _target_: ptev2.loss.WeightedMaskedDenseLoss
-    error_type: mse
+    error_type: smooth_l1
     huber_delta: 1.0
-    w_gbif: 1.0
-    w_splot: 2.0
+    w_gbif: 0.5
+    w_splot: 8.0
 
   optimizer:
     _target_: torch.optim.Adam
-    lr: 1e-3
-    weight_decay: 1e-4
+    lr: 2e-4
+    weight_decay: 1e-5
 
   scheduler:
     _target_: torch.optim.lr_scheduler.StepLR
-    step_size: 5
-    gamma: 0.5
+    step_size: 10
+    gamma: 0.7
 
   scheduler_step:
     mode: epoch
     metric: val_rmse_splot_overall
 
-  gradient_clip_norm: null
+  gradient_clip_norm: 1.0
 
   logging:
     log_val_mae_splot: true

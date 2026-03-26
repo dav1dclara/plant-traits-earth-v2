@@ -1,4 +1,4 @@
 enabled: true
 entity: plant-traits-v2
 project: Project_PTV2
-run_name: ${training.run_name}
+run_name: ${training.train.run_name}
