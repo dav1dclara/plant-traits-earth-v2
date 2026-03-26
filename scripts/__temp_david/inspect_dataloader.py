@@ -1,29 +1,30 @@
 from pathlib import Path
 
-from tqdm import tqdm
+from rich.console import Console
 
 from ptev2.data.dataloader import get_dataloader
+
+console = Console()
 
 ZARR_DIR = Path("/scratch3/plant-traits-v2/data/22km/chips/patch15_stride10")
 PREDICTORS = ["canopy_height", "modis", "soil_grids", "vodca", "worldclim"]
 TARGET = "comb"
-BATCH_SIZE = 32
+SPLIT = "val"
+CHIP_IDX = 1975
 
 dl = get_dataloader(
     ZARR_DIR,
-    split="train",
+    split=SPLIT,
     predictors=PREDICTORS,
     target=TARGET,
-    batch_size=BATCH_SIZE,
+    batch_size=1,
     num_workers=0,
 )
 
-X, y = next(iter(dl))
-print(f"X: {X.shape}, dtype={X.dtype}")
-print(f"y: {y.shape}, dtype={y.dtype}")
-print(f"Dataset size: {len(dl.dataset)} chips")
+console.print(f"Dataset size: {len(dl.dataset)} chips")
 
-print("Iterating through all train batches...")
-for i, (X, y) in enumerate(tqdm(dl)):
-    pass
-print(f"Done. {i + 1} batches.")
+X, y = dl.dataset[CHIP_IDX]
+console.print(f"[bold]X[/bold]: shape={X.shape}, dtype={X.dtype}")
+console.print(X[0])
+console.print(f"[bold]y[/bold]: shape={y.shape}, dtype={y.dtype}")
+console.print(y[0])
