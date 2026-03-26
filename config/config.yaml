@@ -1,7 +1,5 @@
 defaults:
   - paths: default
-  - data: default
-  - chipping: default
   - models: default
   - training: default
   - evaluation: default

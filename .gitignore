@@ -2,7 +2,7 @@
 .DS_Store
 *__pycache__/
 outputs/
-wandb/
+/wandb/
 .vscode/
 
 # Data
@@ -16,3 +16,6 @@ qgis/
 
 # Claude
 .claude/
+
+# temp code
+scripts/__temp_david/

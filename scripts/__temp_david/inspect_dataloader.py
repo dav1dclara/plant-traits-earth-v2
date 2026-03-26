@@ -4,9 +4,9 @@ from tqdm import tqdm
 
 from ptev2.data.dataloader import get_dataloader
 
-ZARR_DIR = Path("/scratch3/plant-traits-v2/data/chips/22km/patch15_stride10")
+ZARR_DIR = Path("/scratch3/plant-traits-v2/data/22km/chips/patch15_stride10")
 PREDICTORS = ["canopy_height", "modis", "soil_grids", "vodca", "worldclim"]
-TARGET = "gbif"
+TARGET = "comb"
 BATCH_SIZE = 32
 
 dl = get_dataloader(

@@ -3,18 +3,18 @@ name: "respatch"  # Options: "baseline", "respatch"
 registry:
   baseline:
     _target_: ptev2.models.baseline.PadarianInspiredPatchCNN
-    in_channels: ${data.in_channels}
-    out_channels: ${data.n_traits}
+    in_channels: ${training.data.predictors.in_channels}
+    out_channels: ${training.data.targets.n_traits}
     hidden_dim: 64
     dropout_p: 0.3
     head_type: "single"
 
   respatch:
     _target_: ptev2.models.traitPatchCNN.ResPatchCNN
-    in_channels: ${data.in_channels}
+    in_channels: ${training.data.predictors.in_channels}
     # Placeholder only. Training/evaluation scripts override this with:
     # selected_trait_count * selected_statistics_count.
-    out_channels: 6
+    out_channels: ${training.data.targets.n_traits}
     # Base feature width. Deeper stages use x2 and x4 of this value.
     base_channels: 32
     norm: "gn"
