@@ -14,16 +14,19 @@ def seed_all(seed: int = 42):
 
 
 def run_name_from_cfg(cfg: DictConfig) -> str:
-    explicit = OmegaConf.select(cfg, "training.run_name")
+    train_cfg = cfg.training.train
+    explicit = train_cfg.run_name
     if explicit:
         return str(explicit)
-    loss_name = str(cfg.training.loss._target_).split(".")[-1]
+    seed = train_cfg.seed
+    loss_name = str(train_cfg.loss._target_).split(".")[-1]
+    patch_h = patch_w = cfg.training.data_loaders.patch_size
     return (
         f"{cfg.models.name}_"
-        f"patch({cfg.data.patch_h}x{cfg.data.patch_w})_"
+        f"patch({patch_h}x{patch_w})_"
         f"bs{cfg.training.data_loaders.batch_size}_"
         f"{loss_name}_"
-        f"seed{cfg.training.seed}"
+        f"seed{seed}"
     )
 
 

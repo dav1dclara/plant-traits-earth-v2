@@ -19,3 +19,5 @@ qgis/
 
 # temp code
 scripts/__temp_david/
+
+inference_outputs/

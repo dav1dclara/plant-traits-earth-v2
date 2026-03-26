@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from sklearn.metrics import mean_squared_error
+from sklearn.metrics import r2_score as sk_r2_score
 
 
 def _to_numpy(x: Any) -> np.ndarray:
@@ -28,20 +30,17 @@ def pearson_r(y_true: Any, y_pred: Any) -> float:
     yt, yp = _mask_finite_pairs(y_true, y_pred)
     if yt.size < 2:
         return float(np.nan)
-
-    yt_c = yt - yt.mean()
-    yp_c = yp - yp.mean()
-    denom = np.linalg.norm(yt_c) * np.linalg.norm(yp_c)
-    if denom == 0.0:
+    corr = np.corrcoef(yt, yp)[0, 1]
+    if not np.isfinite(corr):
         return float(np.nan)
-    return float(np.dot(yt_c, yp_c) / denom)
+    return float(corr)
 
 
 def rmse(y_true: Any, y_pred: Any) -> float:
     yt, yp = _mask_finite_pairs(y_true, y_pred)
     if yt.size == 0:
         return float(np.nan)
-    return float(np.sqrt(np.mean((yp - yt) ** 2)))
+    return float(mean_squared_error(yt, yp, squared=False))
 
 
 def r2_score(y_true: Any, y_pred: Any) -> float:
@@ -49,12 +48,10 @@ def r2_score(y_true: Any, y_pred: Any) -> float:
     yt, yp = _mask_finite_pairs(y_true, y_pred)
     if yt.size < 2:
         return float(np.nan)
-
-    ss_res = float(np.sum((yt - yp) ** 2))
-    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
-    if ss_tot == 0.0:
+    score = sk_r2_score(yt, yp)
+    if not np.isfinite(score):
         return float(np.nan)
-    return float(1.0 - (ss_res / ss_tot))
+    return float(score)
 
 
 def r2_score_manual(y_true: Any, y_pred: Any) -> float:
