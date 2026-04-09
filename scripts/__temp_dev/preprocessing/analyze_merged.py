@@ -8,10 +8,11 @@ and generates visualizations.
 """
 
 import argparse
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
-import matplotlib.pyplot as plt
-from pathlib import Path
 
 # Band names
 BAND_NAMES = ["mean", "std", "median", "q05", "q95", "count"]

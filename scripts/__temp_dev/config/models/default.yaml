@@ -22,6 +22,5 @@ registry:
     # For patch 15x15: [1, 1, 1, 1]. For patch 25x25: [1, 2, 1, 2].
     stride_blocks: [1, 1, 1, 1]
     dropout_p: 0.5
-    head_depth: 3
 
 active: ${.registry.${.name}}

@@ -23,7 +23,7 @@ def run_name_from_cfg(cfg: DictConfig) -> str:
         f"patch({cfg.data.patch_h}x{cfg.data.patch_w})_"
         f"bs{cfg.training.data_loaders.batch_size}_"
         f"{loss_name}_"
-        f"seed{cfg.training.seed}"
+        f"seed{cfg.training.train.seed}"
     )
 
 

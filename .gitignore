@@ -19,3 +19,12 @@ qgis/
 
 # temp code
 scripts/__temp_david/
+scripts/__temp_dev/MMoE/
+!scripts/__temp_dev/MTL/
+
+.conda/
+multirun/
+
+
+MTL/
+analysis/
