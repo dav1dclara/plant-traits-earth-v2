@@ -16,3 +16,8 @@ qgis/
 
 # Claude
 .claude/
+
+# temp code
+scripts/__temp_david/
+
+inference_outputs/
