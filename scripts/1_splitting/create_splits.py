@@ -22,13 +22,15 @@ from ptev2.data.splitting import (
 console = Console()
 
 
-@hydra.main(version_base=None, config_path="../../config", config_name="splitting")
+@hydra.main(
+    version_base=None, config_path="../../config/preprocessing", config_name="splitting"
+)
 def main(cfg: DictConfig) -> None:  # Config
     # Target settings
-    root_dir = Path(cfg.targets.root_dir)
+    data_dir = Path(cfg.data_dir)
     source = cfg.targets.source
     resolution_km = cfg.targets.resolution_km
-    data_dir = root_dir / f"{resolution_km}km" / "targets" / source
+    targets_dir = data_dir / f"{resolution_km}km" / "targets" / source
 
     # H3 settings
     h3_resolution = cfg.h3.resolution
@@ -50,16 +52,16 @@ def main(cfg: DictConfig) -> None:  # Config
     rng = np.random.default_rng(random_seed)
 
     # Output settings
-    out_dir = Path(cfg.out_dir)
+    out_dir = data_dir / f"{resolution_km}km" / "splits"
     out_file = out_dir / f"h3_splits_res{h3_resolution}_{source}_{resolution_km}km.gpkg"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Summary of configuration
     console.rule("[bold]CREATING SPLITS[/bold]")
-    console.print("[bold]\nConfiguration:[/bold]")
+    console.print(f"[bold]Targets settings:[/bold]")
+    console.print(f"Targets dir:        [cyan]{targets_dir}[/cyan]")
     console.print(f"Resolution:      [cyan]{resolution_km}km[/cyan]")
     console.print(f"Source:          [cyan]{source}[/cyan]")
-    console.print(f"Data dir:        [cyan]{data_dir}[/cyan]")
 
     console.print(f"[bold]H3 settings:[/bold]")
     console.print(f"H3 resolution:   [cyan]{h3_resolution}[/cyan]")
@@ -82,7 +84,7 @@ def main(cfg: DictConfig) -> None:  # Config
     # Determine raster CRS from first file
     console.print("[bold]\nDetermining raster CRS[/bold]")
     gbif_rasters = sorted(
-        data_dir.glob("*.tif")
+        targets_dir.glob("*.tif")
     )  # TODO rename to trait_rasters or something less GBIF-specific
     console.print(f"Found {len(gbif_rasters)} target rasters")
     with rasterio.open(gbif_rasters[0]) as src:
