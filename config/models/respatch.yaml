@@ -1,0 +1,7 @@
+_target_: ptev2.models.traitPatchCNN.ResPatchCNN
+base_channels: 32
+norm: "gn"
+gn_groups: 8
+# For patch 15x15: [1, 1, 1, 1]. For patch 25x25: [1, 2, 1, 2].
+stride_blocks: [1, 1, 1, 1]
+dropout_p: 0.2

@@ -15,7 +15,7 @@ console = Console()
 
 
 @hydra.main(
-    version_base=None, config_path="../../config/chipping", config_name="default"
+    version_base=None, config_path="../../config/preprocessing", config_name="chipping"
 )
 def main(cfg: DictConfig) -> None:
     console.rule("[bold]CHIPPING DATA TO ZARR[/bold]")
@@ -94,6 +94,9 @@ def main(cfg: DictConfig) -> None:
 
     console.rule()
 
+    save_all = cfg.settings.get("save_all", False)
+    stride_all = cfg.settings.get("stride_all", None)
+
     chip_rasters_to_zarr(
         predictors=predictor_paths,
         targets=target_paths,
@@ -101,6 +104,8 @@ def main(cfg: DictConfig) -> None:
         patch_size=patch_size,
         stride_per_split=stride_per_split,
         h3_file=splits_file,
+        save_all=save_all,
+        stride_all=stride_all,
     )
 
     # Export chip bounds to GeoPackage for inspection

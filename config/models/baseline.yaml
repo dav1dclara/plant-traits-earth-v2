@@ -1,0 +1,4 @@
+_target_: ptev2.models.baseline.PadarianInspiredPatchCNN
+hidden_dim: 64
+dropout_p: 0.3
+head_type: "single"
