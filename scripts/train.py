@@ -16,6 +16,65 @@ from ptev2.utils import seed_all
 console = Console()
 
 
+def _resolve_model_cfg(cfg: DictConfig) -> DictConfig:
+    """Support both flat model configs and legacy nested configs with 'active'."""
+    model_cfg = cfg.models
+    if OmegaConf.select(model_cfg, "_target_") is not None:
+        return model_cfg
+
+    active_cfg = OmegaConf.select(model_cfg, "active")
+    if active_cfg is not None and OmegaConf.select(active_cfg, "_target_") is not None:
+        return active_cfg
+
+    raise ValueError(
+        "Model config must define '_target_' either at cfg.models._target_ "
+        "or cfg.models.active._target_."
+    )
+
+
+def _build_loss(cfg: DictConfig, n_outputs: int):
+    """Instantiate the configured loss with model-output-aware defaults when needed."""
+    loss_cfg = OmegaConf.create(OmegaConf.to_container(cfg.train.loss, resolve=False))
+
+    # Backward-compatible alias: allow users to pass train.loss.target=...
+    alias_target = OmegaConf.select(loss_cfg, "target")
+    if alias_target is not None:
+        OmegaConf.update(loss_cfg, "_target_", alias_target, force_add=True)
+        if "target" in loss_cfg:
+            del loss_cfg["target"]
+
+    loss_target = str(OmegaConf.select(loss_cfg, "_target_") or "")
+
+    loss_kwargs = {}
+    if loss_target.endswith("UncertaintyWeightedMTLLoss"):
+        loss_kwargs["n_traits"] = int(n_outputs)
+        # These parameters are valid for WeightedMaskedDenseLoss but not uncertainty loss.
+        for incompatible_key in ("error_type", "huber_delta"):
+            if incompatible_key in loss_cfg:
+                del loss_cfg[incompatible_key]
+
+    return instantiate(loss_cfg, **loss_kwargs)
+
+
+def _loss_components(
+    loss_fn,
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    source_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return numerator/denominator for losses with or without loss_components API."""
+    if hasattr(loss_fn, "loss_components"):
+        return loss_fn.loss_components(prediction, target, source_mask)
+
+    try:
+        scalar_loss = loss_fn(prediction, target, source_mask)
+    except TypeError:
+        scalar_loss = loss_fn(prediction, target)
+
+    denominator = scalar_loss.new_tensor(1.0)
+    return scalar_loss, denominator
+
+
 @hydra.main(config_path="../config", config_name="training/default", version_base=None)
 def main(cfg: DictConfig) -> None:
     console.rule("[bold cyan]TRAINING[/bold cyan]")
@@ -163,25 +222,35 @@ def main(cfg: DictConfig) -> None:
     console.print(f"Target shape (C,H,W): [cyan]{tuple(y_t.shape[1:])}[/cyan]")
     console.print(f"Source mask shape (C,H,W): [cyan]{tuple(src_t.shape[1:])}[/cyan]")
 
-    # Model  # TODO ask Luca what happens here
+    model_cfg = _resolve_model_cfg(cfg)
+
+    # Model
     console.print("\n[bold]Model and training configuration[/bold]")
     model = instantiate(
-        cfg.models, in_channels=total_pred_bands, out_channels=len(target_indices)
+        model_cfg, in_channels=total_pred_bands, out_channels=len(target_indices)
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    console.print(f"Model:         [cyan]{cfg.models._target_}[/cyan]")
+    console.print(f"Model:         [cyan]{model_cfg._target_}[/cyan]")
     console.print(f"  In channels:  [cyan]{total_pred_bands}[/cyan]")
     console.print(f"  Out channels: [cyan]{len(target_indices)}[/cyan]")
     console.print(f"  Parameters:   [cyan]{n_params:,}[/cyan]")
 
     # Optimizer, loss, scheduler
-    optimizer = instantiate(cfg.train.optimizer, params=model.parameters())
-    loss_fn = instantiate(cfg.train.loss)
+    loss_fn = _build_loss(cfg, n_outputs=len(target_indices))
+    if isinstance(loss_fn, torch.nn.Module):
+        loss_fn = loss_fn.to(device)
+
+    model_params = list(model.parameters())
+    loss_params = []
+    if isinstance(loss_fn, torch.nn.Module):
+        loss_params = [p for p in loss_fn.parameters() if p.requires_grad]
+    optimizer = instantiate(cfg.train.optimizer, params=model_params + loss_params)
     scheduler = instantiate(cfg.train.scheduler, optimizer=optimizer)
     # scheduler_metric_name = str(cfg.train.scheduler_step.metric)  # TODO: what does this do?
     grad_clip_norm = float(cfg.train.gradient_clip_norm)
     console.print(f"Optimizer:             [cyan]{cfg.train.optimizer._target_}[/cyan]")
-    console.print(f"Loss:                  [cyan]{cfg.train.loss._target_}[/cyan]")
+    loss_name = f"{loss_fn.__class__.__module__}.{loss_fn.__class__.__name__}"
+    console.print(f"Loss:                  [cyan]{loss_name}[/cyan]")
     console.print(f"Scheduler:             [cyan]{cfg.train.scheduler._target_}[/cyan]")
     # console.print(f"Scheduler step metric: [cyan]{scheduler_metric_name}[/cyan]")
     console.print(f"Gradient clip norm:    [cyan]{grad_clip_norm}[/cyan]")
@@ -272,7 +341,7 @@ def main(cfg: DictConfig) -> None:
             y_pred = model(X)
             if not torch.isfinite(y_pred).all():
                 continue
-            batch_num, batch_den = loss_fn.loss_components(y_pred, y, src)
+            batch_num, batch_den = _loss_components(loss_fn, y_pred, y, src)
             if (
                 not torch.isfinite(batch_num)
                 or not torch.isfinite(batch_den)
@@ -299,6 +368,11 @@ def main(cfg: DictConfig) -> None:
         model.eval()
         val_num_total = 0.0
         val_den_total = 0.0
+        val_gate_entropy_sum = 0.0
+        val_gate_maxprob_sum = 0.0
+        val_gate_entropy_norm_sum = 0.0
+        val_gate_usage_sum = None
+        val_gate_count = 0
         # val_total_pixels = 0
         # val_valid_pixels = 0
 
@@ -323,7 +397,25 @@ def main(cfg: DictConfig) -> None:
                 y_pred = model(X)
                 if not torch.isfinite(y_pred).all():
                     continue
-                batch_num, batch_den = loss_fn.loss_components(y_pred, y, src)
+
+                gate_weights = getattr(model, "last_gate_weights", None)
+                if gate_weights is not None:
+                    gw = gate_weights.detach()
+                    n_experts = gw.shape[-1]
+                    eps = 1e-12
+                    entropy = -(gw * gw.clamp_min(eps).log()).sum(dim=-1)
+                    max_prob = gw.max(dim=-1).values
+                    entropy_norm = entropy / max(math.log(float(n_experts)), eps)
+                    gate_usage = gw.mean(dim=(0, 1))
+                    if val_gate_usage_sum is None:
+                        val_gate_usage_sum = torch.zeros_like(gate_usage)
+                    val_gate_entropy_sum += float(entropy.mean().item())
+                    val_gate_maxprob_sum += float(max_prob.mean().item())
+                    val_gate_entropy_norm_sum += float(entropy_norm.mean().item())
+                    val_gate_usage_sum += gate_usage
+                    val_gate_count += 1
+
+                batch_num, batch_den = _loss_components(loss_fn, y_pred, y, src)
                 if (
                     not torch.isfinite(batch_num)
                     or not torch.isfinite(batch_den)
@@ -361,6 +453,9 @@ def main(cfg: DictConfig) -> None:
                     "in_channels": total_pred_bands,
                     "out_channels": len(target_indices),
                     "config": OmegaConf.to_container(cfg, resolve=True),
+                    "wandb_run_id": getattr(run, "id", None)
+                    if cfg.wandb.enabled
+                    else None,
                 },
                 best_checkpoint_path,
             )
@@ -380,6 +475,16 @@ def main(cfg: DictConfig) -> None:
             }
             if is_best:
                 log_dict["val/loss_best"] = best_val_loss
+            if val_gate_count > 0:
+                gate_entropy = val_gate_entropy_sum / val_gate_count
+                gate_entropy_norm = val_gate_entropy_norm_sum / val_gate_count
+                log_dict["val/gate_entropy"] = gate_entropy
+                log_dict["val/gate_entropy_norm"] = gate_entropy_norm
+                log_dict["val/gate_max_prob"] = val_gate_maxprob_sum / val_gate_count
+                log_dict["val/gate_effective_experts"] = math.exp(gate_entropy)
+                gate_usage_mean = val_gate_usage_sum / val_gate_count
+                for expert_idx, usage in enumerate(gate_usage_mean.tolist()):
+                    log_dict[f"val/gate_usage/e{expert_idx}"] = float(usage)
             if wandb_module is not None:
                 wandb_module.log(log_dict)
 
@@ -401,6 +506,7 @@ def main(cfg: DictConfig) -> None:
         final_status = (
             "ok" if math.isfinite(best_val_loss) and best_epoch > 0 else "failed"
         )
+        run.summary["wandb_run_id"] = getattr(run, "id", None)
         run.summary["best_val_loss"] = (
             float(best_val_loss) if math.isfinite(best_val_loss) else None
         )

@@ -4,6 +4,7 @@ defaults:
   - training: default
   - evaluation: default
   - prediction: default
+  - test: default
   - wandb: default
   - _self_
 

@@ -4,8 +4,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from ptev2.metrics.core import pearson_r, r2_score, rmse
-from ptev2.metrics.uncertainty import pixelwise_cov, summarize_cov
+from ptev2.metrics.core import mae, pearson_r, r2_score, rmse
 
 
 def _to_numpy(x: Any) -> np.ndarray:
@@ -51,6 +50,13 @@ def _validate_shapes(
         )
 
 
+def _finite_mean(values: Sequence[float]) -> float:
+    finite = np.asarray([value for value in values if np.isfinite(value)], dtype=float)
+    if finite.size == 0:
+        return float(np.nan)
+    return float(np.mean(finite))
+
+
 def summarize_single_trait_metrics(
     y_true: Any,
     y_pred: Any,
@@ -77,17 +83,14 @@ def summarize_single_trait_metrics(
         global_rmse = float(rmse(global_y_true, global_y_pred))
         global_r2 = float(r2_score(global_y_true, global_y_pred))
         global_pearson_r = float(pearson_r(global_y_true, global_y_pred))
+        global_mae = float(mae(global_y_true, global_y_pred))
         global_n_valid = int(global_y_true.size)
     else:
         global_rmse = float("nan")
         global_r2 = float("nan")
         global_pearson_r = float("nan")
+        global_mae = float("nan")
         global_n_valid = 0
-
-    global_cov_map = pixelwise_cov(y_pred_np, axis=0)
-    global_cov_summary = summarize_cov(
-        global_cov_map, mask=np.any(global_valid, axis=0)
-    )
 
     trait_metrics: dict[str, dict[str, float]] = {}
     for trait_idx, trait_name in enumerate(trait_names):
@@ -107,33 +110,39 @@ def summarize_single_trait_metrics(
             trait_rmse = float(rmse(yt_trait, yp_trait))
             trait_r2 = float(r2_score(yt_trait, yp_trait))
             trait_pearson_r = float(pearson_r(yt_trait, yp_trait))
+            trait_mae = float(mae(yt_trait, yp_trait))
             trait_n_valid = int(yt_trait.size)
         else:
             trait_rmse = float("nan")
             trait_r2 = float("nan")
             trait_pearson_r = float("nan")
+            trait_mae = float("nan")
             trait_n_valid = 0
-
-        trait_cov_map = pixelwise_cov(y_pred_trait, axis=0)
-        trait_cov_summary = summarize_cov(
-            trait_cov_map, mask=np.any(valid_trait, axis=0)
-        )
 
         trait_metrics[str(trait_name)] = {
             "n_valid": trait_n_valid,
             "rmse": trait_rmse,
             "r2": trait_r2,
             "pearson_r": trait_pearson_r,
-            "cov": trait_cov_summary["cov_mean"],
-            **trait_cov_summary,
+            "mae": trait_mae,
         }
+
+    macro_rmse = _finite_mean([values["rmse"] for values in trait_metrics.values()])
+    macro_r2 = _finite_mean([values["r2"] for values in trait_metrics.values()])
+    macro_pearson_r = _finite_mean(
+        [values["pearson_r"] for values in trait_metrics.values()]
+    )
+    macro_mae = _finite_mean([values["mae"] for values in trait_metrics.values()])
 
     return {
         "rmse": global_rmse,
         "r2": global_r2,
         "pearson_r": global_pearson_r,
+        "mae": global_mae,
         "n_valid": global_n_valid,
-        "cov": global_cov_summary["cov_mean"],
-        **global_cov_summary,
+        "macro_rmse": macro_rmse,
+        "macro_r2": macro_r2,
+        "macro_pearson_r": macro_pearson_r,
+        "macro_mae": macro_mae,
         "trait_metrics": trait_metrics,
     }
