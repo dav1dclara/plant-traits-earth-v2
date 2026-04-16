@@ -5,16 +5,23 @@ Configuration at top - just edit config section and run.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 from dataloader import get_mtl_dataloader
+from gate_analysis import resolve_trait_ids, summarize_gate_weights
 from loss_v2 import UncertaintyWeightedMTLLoss, per_trait_masked_loss
 from metrics import compute_metrics
-from models_v2 import MMoEModel, MTLModel, STLModel
+from models_v2 import GatedMMoEModel, MMoEModel, MTLModel, STLModel
 from tqdm import tqdm
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -29,7 +36,7 @@ BATCH_SIZE = 32
 NUM_WORKERS = 4
 
 # Model architecture
-MODEL_TYPE = "mtl"  # "stl", "mtl", or "mmoe"
+MODEL_TYPE = "mmoe"  # "stl", "mtl", "mmoe", or "mmoe_gated"
 N_TRAITS = 37
 IN_CHANNELS = 150
 BASE_CHANNELS = 48
@@ -40,6 +47,8 @@ STRIDE_BLOCKS = (1, 1, 1, 1)  # no downsampling for spatial predictions
 # MMoE-specific
 N_EXPERTS = 6
 EXPERT_HIDDEN = 192
+GATE_TEMPERATURE = 0.5
+GATE_TOP_K = 2
 
 # Training
 EPOCHS = 100
@@ -61,10 +70,18 @@ VAL_METRIC_SOURCE = "splot"  # 'splot', 'gbif', or 'all'
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
 
+# Weights & Biases
+USE_WANDB = True
+WANDB_PROJECT = "Project_PTV2"
+WANDB_ENTITY = None  # set to your team/user if needed
+WANDB_RUN_NAME = None  # auto-generated when None
+WANDB_WATCH = False  # set True to log gradients/parameters
+
 # Output
 SCRIPT_ROOT = Path(__file__).resolve().parent
 CHECKPOINT_DIR = SCRIPT_ROOT / "results" / MODEL_TYPE / "checkpoints"
 METRICS_DIR = SCRIPT_ROOT / "results" / MODEL_TYPE / "metrics"
+TRAIT_DIR = ZARR_DIR.parents[1] / "targets" / "comb"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -121,6 +138,90 @@ def _initial_best_score(best_by: str) -> float:
     return float("inf") if best_by == "val_loss" else float("-inf")
 
 
+def _build_wandb_config() -> dict:
+    """Return a serializable config dict for W&B."""
+    return {
+        "model_type": MODEL_TYPE,
+        "zarr_dir": str(ZARR_DIR),
+        "predictors": PREDICTORS,
+        "targets": TARGETS,
+        "batch_size": BATCH_SIZE,
+        "num_workers": NUM_WORKERS,
+        "n_traits": N_TRAITS,
+        "in_channels": IN_CHANNELS,
+        "base_channels": BASE_CHANNELS,
+        "norm": NORM,
+        "dropout_p": DROPOUT_P,
+        "stride_blocks": list(STRIDE_BLOCKS),
+        "n_experts": N_EXPERTS,
+        "expert_hidden": EXPERT_HIDDEN,
+        "gate_temperature": GATE_TEMPERATURE,
+        "gate_top_k": GATE_TOP_K,
+        "epochs": EPOCHS,
+        "lr": LR,
+        "min_lr": MIN_LR,
+        "weight_decay": WEIGHT_DECAY,
+        "grad_clip": GRAD_CLIP,
+        "w_gbif": W_GBIF,
+        "w_splot": W_SPLOT,
+        "early_stop_patience": EARLY_STOP_PATIENCE,
+        "best_by": BEST_BY,
+        "val_metric_source": VAL_METRIC_SOURCE,
+        "device": DEVICE,
+        "seed": SEED,
+    }
+
+
+def _log_to_wandb(
+    epoch: int,
+    train_loss: float,
+    val_loss: float,
+    val_metrics: dict,
+    current_lr: float,
+    elapsed: float,
+) -> None:
+    """Log scalar metrics to an active W&B run."""
+    if wandb is None or wandb.run is None:
+        return
+
+    log_payload = {
+        "epoch": epoch,
+        "train/loss": float(train_loss),
+        "val/loss": float(val_loss),
+        "val/pearson_r_mean": float(val_metrics.get("pearson_r_mean", float("nan"))),
+        "val/n_traits_r_above_0_5": int(val_metrics.get("n_traits_r_above_0_5", 0)),
+        "train/lr": float(current_lr),
+        "time/epoch_sec": float(elapsed),
+    }
+
+    gate_entropy = val_metrics.get("gate_mean_entropy")
+    if gate_entropy is not None and np.isfinite(gate_entropy):
+        log_payload["gate/mean_entropy"] = float(gate_entropy)
+
+    gate_expert_usage = val_metrics.get("gate_expert_usage_mean")
+    if gate_expert_usage is not None:
+        for expert_idx, usage in enumerate(gate_expert_usage):
+            if np.isfinite(usage):
+                log_payload[f"gate/expert_usage/e{expert_idx}"] = float(usage)
+
+    for metric_name in ("rmse_mean", "mae_mean", "r2_mean"):
+        metric_value = val_metrics.get(metric_name)
+        if metric_value is not None and np.isfinite(metric_value):
+            log_payload[f"val/{metric_name}"] = float(metric_value)
+
+    per_trait_r = val_metrics.get("per_trait_r", [])
+    for trait_idx, value in enumerate(per_trait_r):
+        if value is not None and np.isfinite(value):
+            log_payload[f"val/per_trait_r/trait_{trait_idx:02d}"] = float(value)
+
+    per_trait_loss = val_metrics.get("per_trait_loss", [])
+    for trait_idx, value in enumerate(per_trait_loss):
+        if value is not None and np.isfinite(value):
+            log_payload[f"val/per_trait_loss/trait_{trait_idx:02d}"] = float(value)
+
+    wandb.log(log_payload, step=epoch)
+
+
 def build_model(
     model_type: str,
     in_channels: int,
@@ -131,6 +232,8 @@ def build_model(
     stride_blocks: tuple,
     n_experts: int = 4,
     expert_hidden: int = 64,
+    gate_temperature: float = 1.0,
+    gate_top_k: int | None = None,
 ) -> nn.Module:
     """Instantiate model based on type."""
     if model_type == "stl":
@@ -161,6 +264,19 @@ def build_model(
             stride_blocks=stride_blocks,
             n_experts=n_experts,
             expert_hidden=expert_hidden,
+        )
+    elif model_type == "mmoe_gated":
+        return GatedMMoEModel(
+            in_channels=in_channels,
+            n_traits=n_traits,
+            base_channels=base_channels,
+            norm=norm,
+            dropout_p=dropout_p,
+            stride_blocks=stride_blocks,
+            n_experts=n_experts,
+            expert_hidden=expert_hidden,
+            gate_temperature=gate_temperature,
+            gate_top_k=gate_top_k,
         )
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
@@ -210,7 +326,7 @@ def eval_epoch(
     model: nn.Module,
     val_loader,
     device: torch.device,
-) -> tuple[float, dict]:
+) -> tuple[float, dict, dict | None]:
     """Evaluation loop, returns loss and validation metrics."""
     model.eval()
     total_loss = 0.0
@@ -219,6 +335,7 @@ def eval_epoch(
     all_preds = []
     all_targets = []
     all_source_masks = []
+    all_gate_weights = []
 
     with torch.no_grad():
         for X, y_full in tqdm(val_loader, desc="Val"):
@@ -246,6 +363,9 @@ def eval_epoch(
             all_preds.append(y_pred.cpu().numpy())
             all_targets.append(y_target.cpu().numpy())
             all_source_masks.append(src_mask.cpu().numpy())
+            gate_weights = getattr(model, "last_gate_weights", None)
+            if gate_weights is not None:
+                all_gate_weights.append(gate_weights.cpu().numpy())
 
     avg_loss = total_loss / max(n_batches, 1)
     per_trait = np.nanmean(np.stack(all_trait_losses), axis=0)  # (37,)
@@ -264,7 +384,19 @@ def eval_epoch(
         np.sum(np.array(val_metrics["per_trait_r"]) > 0.5)
     )
 
-    return avg_loss, val_metrics
+    gate_summary = None
+    if all_gate_weights:
+        trait_ids = resolve_trait_ids(TRAIT_DIR, N_TRAITS)
+        gate_summary = summarize_gate_weights(
+            np.concatenate(all_gate_weights, axis=0),
+            trait_ids,
+        )
+        val_metrics["gate_mean_entropy"] = float(gate_summary["mean_entropy"])
+        val_metrics["gate_expert_usage_mean"] = gate_summary["expert_usage_mean"]
+        val_metrics["gate_top_positive_pairs"] = gate_summary["top_positive_pairs"][:10]
+        val_metrics["gate_top_negative_pairs"] = gate_summary["top_negative_pairs"][:10]
+
+    return avg_loss, val_metrics, gate_summary
 
 
 def main() -> None:
@@ -283,6 +415,9 @@ def main() -> None:
     print(f"Learning rate: {LR}")
     print(f"Minimum learning rate: {MIN_LR}")
     print(f"Validation metric source: {VAL_METRIC_SOURCE}")
+    if MODEL_TYPE == "mmoe_gated":
+        print(f"Gate temperature: {GATE_TEMPERATURE}")
+        print(f"Gate top-k: {GATE_TOP_K}")
 
     # Dataloaders
     print("Loading dataloaders...")
@@ -305,8 +440,25 @@ def main() -> None:
         STRIDE_BLOCKS,
         N_EXPERTS,
         EXPERT_HIDDEN,
+        GATE_TEMPERATURE,
+        GATE_TOP_K,
     )
     model = model.to(device)
+
+    if USE_WANDB:
+        if wandb is None:
+            raise ImportError(
+                "wandb is not installed. Install it with `pip install wandb` or disable USE_WANDB."
+            )
+        run_name = WANDB_RUN_NAME or f"{MODEL_TYPE}_{time.strftime('%Y%m%d_%H%M%S')}"
+        wandb.init(
+            project=WANDB_PROJECT,
+            entity=WANDB_ENTITY,
+            name=run_name,
+            config=_build_wandb_config(),
+            dir=str(SCRIPT_ROOT / "wandb"),
+            tags=[MODEL_TYPE, VAL_METRIC_SOURCE],
+        )
 
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -315,6 +467,9 @@ def main() -> None:
         T_max=EPOCHS,
         eta_min=MIN_LR,
     )
+
+    if USE_WANDB and WANDB_WATCH:
+        wandb.watch(model, log="all", log_freq=100)
 
     # Loss function
     loss_fn = UncertaintyWeightedMTLLoss(w_gbif=W_GBIF, w_splot=W_SPLOT)
@@ -331,6 +486,8 @@ def main() -> None:
     best_score = _initial_best_score(BEST_BY)
     patience_counter = 0
     best_checkpoint = None
+    gate_entropy_history = []
+    expert_usage_history = []
 
     for epoch in range(1, EPOCHS + 1):
         t_start = time.time()
@@ -342,11 +499,18 @@ def main() -> None:
         train_losses.append(train_loss)
 
         # Eval
-        val_loss, val_metrics = eval_epoch(model, val_loader, device)
+        val_loss, val_metrics, gate_summary = eval_epoch(model, val_loader, device)
         val_losses.append(val_loss)
         val_mean_r = float(val_metrics["pearson_r_mean"])
         n_traits_above_0_5 = int(val_metrics["n_traits_r_above_0_5"])
         current_lr = float(optimizer.param_groups[0]["lr"])
+        gate_entropy = float(val_metrics.get("gate_mean_entropy", float("nan")))
+        gate_expert_usage = val_metrics.get("gate_expert_usage_mean")
+
+        if gate_expert_usage is not None:
+            expert_usage_history.append(gate_expert_usage)
+        if np.isfinite(gate_entropy):
+            gate_entropy_history.append(gate_entropy)
 
         if val_mean_r > max_val_mean_r:
             max_val_mean_r = val_mean_r
@@ -359,8 +523,27 @@ def main() -> None:
             f"Epoch {epoch}/{EPOCHS} | "
             f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} | "
             f"val_mean_r={val_mean_r:.4f} | r>0.5={n_traits_above_0_5} | "
+            f"gate_entropy={gate_entropy:.3f} | "
             f"lr={current_lr:.2e} | "
             f"time={elapsed:.1f}s"
+        )
+
+        if gate_expert_usage is not None:
+            print(
+                "  gate expert usage: "
+                + ", ".join(
+                    f"e{expert_idx}={usage:.3f}"
+                    for expert_idx, usage in enumerate(gate_expert_usage)
+                )
+            )
+
+        _log_to_wandb(
+            epoch=epoch,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            val_metrics=val_metrics,
+            current_lr=current_lr,
+            elapsed=elapsed,
         )
 
         # Save the latest checkpoint
@@ -377,9 +560,20 @@ def main() -> None:
                 "n_traits_r_above_0_5": n_traits_above_0_5,
                 "scheduler_state_dict": scheduler.state_dict(),
                 "val_metrics": val_metrics,
+                "gate_summary": gate_summary,
+                "gate_temperature": GATE_TEMPERATURE,
+                "gate_top_k": GATE_TOP_K,
             },
             last_ckpt_path,
         )
+        if gate_summary is not None:
+            with open(METRICS_DIR / f"{MODEL_TYPE}_last_gate_summary.json", "w") as f:
+                serializable_gate_summary = {
+                    key: value
+                    for key, value in gate_summary.items()
+                    if not key.startswith("_")
+                }
+                json.dump(serializable_gate_summary, f, indent=2)
 
         # Best checkpoint selection
         current_score = val_loss if BEST_BY == "val_loss" else val_mean_r
@@ -401,11 +595,24 @@ def main() -> None:
                     "n_traits_r_above_0_5": n_traits_above_0_5,
                     "scheduler_state_dict": scheduler.state_dict(),
                     "val_metrics": val_metrics,
+                    "gate_summary": gate_summary,
+                    "gate_temperature": GATE_TEMPERATURE,
+                    "gate_top_k": GATE_TOP_K,
                 },
                 best_ckpt_path,
             )
             best_checkpoint = best_ckpt_path
             print(f"  ✓ Best checkpoint updated by {BEST_BY}: {best_ckpt_path}")
+            if gate_summary is not None:
+                with open(
+                    METRICS_DIR / f"{MODEL_TYPE}_best_gate_summary.json", "w"
+                ) as f:
+                    serializable_gate_summary = {
+                        key: value
+                        for key, value in gate_summary.items()
+                        if not key.startswith("_")
+                    }
+                    json.dump(serializable_gate_summary, f, indent=2)
         else:
             patience_counter += 1
             if patience_counter >= EARLY_STOP_PATIENCE:
@@ -439,12 +646,26 @@ def main() -> None:
         "initial_lr": float(LR),
         "min_lr": float(MIN_LR),
         "epochs_trained": epoch,
+        "gate_entropy_history": gate_entropy_history,
+        "expert_usage_history": expert_usage_history,
+        "gate_temperature": float(GATE_TEMPERATURE),
+        "gate_top_k": None if GATE_TOP_K is None else int(GATE_TOP_K),
     }
-    import json
-
     with open(METRICS_DIR / "train_history.json", "w") as f:
         json.dump(history, f, indent=2)
     print(f"Training history saved to {METRICS_DIR / 'train_history.json'}")
+
+    if USE_WANDB and wandb is not None and wandb.run is not None:
+        wandb.run.summary["best_selection_metric"] = float(best_score)
+        wandb.run.summary["best_val_loss"] = float(best_val_loss)
+        wandb.run.summary["best_mean_r"] = float(best_mean_r)
+        wandb.run.summary["max_val_mean_r"] = float(max_val_mean_r)
+        wandb.run.summary["max_val_mean_r_epoch"] = int(max_val_mean_r_epoch)
+        wandb.run.summary["best_checkpoint"] = (
+            str(best_checkpoint) if best_checkpoint is not None else None
+        )
+        wandb.run.summary["last_checkpoint"] = str(last_ckpt_path)
+        wandb.finish()
 
 
 if __name__ == "__main__":

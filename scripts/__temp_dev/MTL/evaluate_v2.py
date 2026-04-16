@@ -5,13 +5,15 @@ Configuration at top - match train_v2.py settings.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import torch
 from dataloader import get_mtl_dataloader
+from gate_analysis import resolve_trait_ids, summarize_gate_weights
 from metrics import compute_metrics
-from models_v2 import MMoEModel, MTLModel, STLModel
+from models_v2 import GatedMMoEModel, MMoEModel, MTLModel, STLModel
 from tqdm import tqdm
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -26,7 +28,7 @@ BATCH_SIZE = 32
 NUM_WORKERS = 4
 
 # Model architecture - MUST MATCH TRAINING CONFIG
-MODEL_TYPE = "mtl"  # "stl", "mtl", or "mmoe"
+MODEL_TYPE = "mmoe_gated"  # "stl", "mtl", "mmoe", or "mmoe_gated"
 N_TRAITS = 37
 IN_CHANNELS = 150
 BASE_CHANNELS = 48
@@ -37,6 +39,8 @@ STRIDE_BLOCKS = (1, 1, 1, 1)
 # MMoE-specific (if using mmoe)
 N_EXPERTS = 6
 EXPERT_HIDDEN = 192
+GATE_TEMPERATURE = 0.5
+GATE_TOP_K = 2
 
 # Checkpoint to evaluate
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -91,6 +95,8 @@ def build_model(
     stride_blocks: tuple,
     n_experts: int = 4,
     expert_hidden: int = 64,
+    gate_temperature: float = 1.0,
+    gate_top_k: int | None = None,
 ):
     """Build model matching train config."""
     if model_type == "stl":
@@ -122,24 +128,28 @@ def build_model(
             n_experts=n_experts,
             expert_hidden=expert_hidden,
         )
+    elif model_type == "mmoe_gated":
+        return GatedMMoEModel(
+            in_channels=in_channels,
+            n_traits=n_traits,
+            base_channels=base_channels,
+            norm=norm,
+            dropout_p=dropout_p,
+            stride_blocks=stride_blocks,
+            n_experts=n_experts,
+            expert_hidden=expert_hidden,
+            gate_temperature=gate_temperature,
+            gate_top_k=gate_top_k,
+        )
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
-
-
-def resolve_trait_ids(n_traits: int) -> list[str]:
-    """Resolve trait IDs from the merged target rasters."""
-    if TRAIT_DIR.exists():
-        trait_ids = sorted(path.stem for path in TRAIT_DIR.glob("*.tif"))
-        if len(trait_ids) >= n_traits:
-            return trait_ids[:n_traits]
-    return [f"trait_{idx:02d}" for idx in range(n_traits)]
 
 
 def evaluate(
     model: torch.nn.Module,
     test_loader,
     device: torch.device,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
     """
     Evaluate model on test set.
     Returns: predictions, targets, and source masks, all (N_samples, N_traits, H, W)
@@ -148,6 +158,7 @@ def evaluate(
     all_preds = []
     all_targets = []
     all_source_masks = []
+    all_gate_weights = []
 
     with torch.no_grad():
         for X, y_full in tqdm(test_loader, desc="Evaluating"):
@@ -164,12 +175,18 @@ def evaluate(
             all_preds.append(y_pred.cpu().numpy())
             all_targets.append(y_target.cpu().numpy())
             all_source_masks.append(src_mask.cpu().numpy())
+            gate_weights = getattr(model, "last_gate_weights", None)
+            if gate_weights is not None:
+                all_gate_weights.append(gate_weights.cpu().numpy())
 
     preds = np.concatenate(all_preds, axis=0)  # (N, 37, H, W)
     targets = np.concatenate(all_targets, axis=0)  # (N, 37, H, W)
     source_masks = np.concatenate(all_source_masks, axis=0)  # (N, 37, H, W)
+    gate_weights = None
+    if all_gate_weights:
+        gate_weights = np.concatenate(all_gate_weights, axis=0)
 
-    return preds, targets, source_masks
+    return preds, targets, source_masks, gate_weights
 
 
 def main() -> None:
@@ -181,6 +198,9 @@ def main() -> None:
     print(f"Model type: {MODEL_TYPE}")
     print(f"Checkpoint: {CHECKPOINT_PATH}")
     print(f"Evaluation source: {EVAL_SOURCE}")
+    if MODEL_TYPE == "mmoe_gated":
+        print(f"Gate temperature: {GATE_TEMPERATURE}")
+        print(f"Gate top-k: {GATE_TOP_K}")
 
     # Load data
     print("Loading test set...")
@@ -200,6 +220,8 @@ def main() -> None:
         STRIDE_BLOCKS,
         N_EXPERTS,
         EXPERT_HIDDEN,
+        GATE_TEMPERATURE,
+        GATE_TOP_K,
     )
     model = model.to(device)
 
@@ -215,13 +237,15 @@ def main() -> None:
 
     # Evaluate
     print("Evaluating...")
-    preds, targets, source_masks = evaluate(model, test_loader, device)
+    preds, targets, source_masks, gate_weights = evaluate(model, test_loader, device)
 
     # Save predictions
     print(f"Saving results to {RESULTS_DIR}")
     np.save(RESULTS_DIR / "test_preds.npy", preds)
     np.save(RESULTS_DIR / "test_targets.npy", targets)
     np.save(RESULTS_DIR / "test_source_masks.npy", source_masks)
+    if gate_weights is not None:
+        np.save(RESULTS_DIR / "test_gate_weights.npy", gate_weights)
 
     # Compute metrics
     print("Computing metrics...")
@@ -231,7 +255,7 @@ def main() -> None:
         source_mask=source_masks,
         eval_source=EVAL_SOURCE,
     )
-    trait_ids = resolve_trait_ids(N_TRAITS)
+    trait_ids = resolve_trait_ids(TRAIT_DIR, N_TRAITS)
     metrics["trait_ids"] = trait_ids
     metrics["per_trait_summary"] = [
         {
@@ -243,9 +267,31 @@ def main() -> None:
         for idx, trait_id in enumerate(trait_ids)
     ]
 
-    # Save metrics
-    import json
+    gate_summary = None
+    if gate_weights is not None:
+        gate_summary = summarize_gate_weights(gate_weights, trait_ids)
+        metrics["gate_mean_entropy"] = float(gate_summary["mean_entropy"])
+        metrics["gate_expert_usage_mean"] = gate_summary["expert_usage_mean"]
+        with open(RESULTS_DIR / "gate_summary.json", "w") as f:
+            json.dump(
+                {
+                    key: value
+                    for key, value in gate_summary.items()
+                    if not key.startswith("_")
+                },
+                f,
+                indent=2,
+            )
+        np.save(
+            RESULTS_DIR / "gate_similarity_matrix.npy",
+            gate_summary["_gate_similarity_array"],
+        )
+        np.save(
+            RESULTS_DIR / "mean_gate_weights.npy",
+            gate_summary["_mean_gate_weights_array"],
+        )
 
+    # Save metrics
     with open(RESULTS_DIR / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
 
@@ -266,6 +312,15 @@ def main() -> None:
     print(f"R^2 (mean across traits): {metrics['r2_mean']:.4f}")
     print(f"RMSE (all pixels): {metrics['rmse_all']:.4f}")
     print(f"RMSE (per-trait mean): {metrics['rmse_mean']:.4f}")
+    if gate_summary is not None:
+        print(f"Gate mean entropy: {metrics['gate_mean_entropy']:.4f}")
+        print(
+            "Expert usage mean: "
+            + ", ".join(
+                f"e{expert_idx}={usage:.3f}"
+                for expert_idx, usage in enumerate(metrics["gate_expert_usage_mean"])
+            )
+        )
     print(f"\nResults saved to: {RESULTS_DIR}")
 
 

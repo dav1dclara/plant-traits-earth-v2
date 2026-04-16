@@ -9,6 +9,7 @@ Supports:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +17,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataloader import get_mtl_dataloader
-from models_v2 import MMoEModel, MTLModel, STLModel
+from gate_analysis import (
+    build_pair_records,
+    matrix_to_jsonable,
+    resolve_trait_ids,
+    summarize_gate_weights,
+)
+from models_v2 import GatedMMoEModel, MMoEModel, MTLModel, STLModel
 
 # Data
 ZARR_DIR = Path("/scratch3/plant-traits-v2/data/22km/chips/patch15_stride10")
@@ -26,7 +33,7 @@ BATCH_SIZE = 32
 NUM_WORKERS = 4
 
 # Model configuration
-MODEL_TYPE = "mmoe"  # "stl", "mtl", or "mmoe"
+MODEL_TYPE = "mmoe"  # "stl", "mtl", "mmoe", or "mmoe_gated"
 N_TRAITS = 37
 IN_CHANNELS = 150
 BASE_CHANNELS = 48
@@ -35,6 +42,8 @@ DROPOUT_P = 0.1
 STRIDE_BLOCKS = (1, 1, 1, 1)
 N_EXPERTS = 6
 EXPERT_HIDDEN = 192
+GATE_TEMPERATURE = 0.5
+GATE_TOP_K = 2
 
 # Checkpoints and output
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -84,6 +93,8 @@ def build_model(
     stride_blocks: tuple,
     n_experts: int = 4,
     expert_hidden: int = 64,
+    gate_temperature: float = 1.0,
+    gate_top_k: int | None = None,
 ) -> nn.Module:
     """Instantiate a model matching training/evaluation config."""
     if model_type == "stl":
@@ -115,16 +126,20 @@ def build_model(
             n_experts=n_experts,
             expert_hidden=expert_hidden,
         )
+    if model_type == "mmoe_gated":
+        return GatedMMoEModel(
+            in_channels=in_channels,
+            n_traits=n_traits,
+            base_channels=base_channels,
+            norm=norm,
+            dropout_p=dropout_p,
+            stride_blocks=stride_blocks,
+            n_experts=n_experts,
+            expert_hidden=expert_hidden,
+            gate_temperature=gate_temperature,
+            gate_top_k=gate_top_k,
+        )
     raise ValueError(f"Unknown model_type: {model_type}")
-
-
-def resolve_trait_ids(n_traits: int) -> list[str]:
-    """Resolve trait IDs from merged target rasters when available."""
-    if TRAIT_DIR.exists():
-        trait_ids = sorted(path.stem for path in TRAIT_DIR.glob("*.tif"))
-        if len(trait_ids) >= n_traits:
-            return trait_ids[:n_traits]
-    return [f"trait_{idx:02d}" for idx in range(n_traits)]
 
 
 def _reorder_square_matrix(
@@ -194,6 +209,80 @@ def _plot_matrix(
     return reordered_matrix, reordered_names, order
 
 
+def _save_score_bundle(
+    save_dir: Path,
+    stem: str,
+    metric_name: str,
+    matrix: np.ndarray,
+    ordered_matrix: np.ndarray,
+    trait_ids: list[str],
+    ordered_trait_ids: list[str],
+    order: np.ndarray,
+    **metadata,
+) -> None:
+    """Save labeled outputs so trait relationships can be inspected later."""
+    pair_records = build_pair_records(matrix, trait_ids)
+    pair_records_desc = sorted(
+        pair_records, key=lambda record: record["score"], reverse=True
+    )
+    pair_records_asc = sorted(pair_records, key=lambda record: record["score"])
+
+    payload = {
+        "metric": metric_name,
+        "trait_ids": trait_ids,
+        "ordered_trait_ids": ordered_trait_ids,
+        "order": [int(index) for index in order.tolist()],
+        "matrix": matrix_to_jsonable(matrix),
+        "ordered_matrix": matrix_to_jsonable(ordered_matrix),
+        "pairs": pair_records_desc,
+        "top_positive_pairs": pair_records_desc[:25],
+        "top_negative_pairs": pair_records_asc[:25],
+    }
+    payload.update(metadata)
+
+    np.save(save_dir / f"{stem}.npy", matrix)
+    np.save(save_dir / f"{stem}_ordered.npy", ordered_matrix)
+    with open(save_dir / f"{stem}_order.txt", "w") as handle:
+        handle.write("\n".join(ordered_trait_ids) + "\n")
+    with open(save_dir / f"{stem}_scores.json", "w") as handle:
+        json.dump(payload, handle, indent=2)
+
+    print(f"Saved labeled scores to {save_dir / f'{stem}_scores.json'}")
+
+
+def _plot_rect_matrix(
+    matrix: np.ndarray,
+    row_names: list[str],
+    col_names: list[str],
+    save_path: Path,
+    title: str,
+    cmap: str = "viridis",
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib is not installed; heatmap generation is skipped.")
+        return
+
+    height = max(10, len(row_names) * 0.35)
+    width = max(6, len(col_names) * 1.2)
+    fig, ax = plt.subplots(figsize=(width, height))
+    image = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
+    fig.colorbar(image, ax=ax, fraction=0.046)
+    ax.set_xticks(range(len(col_names)))
+    ax.set_yticks(range(len(row_names)))
+    ax.set_xticklabels(col_names, fontsize=8)
+    ax.set_yticklabels(row_names, fontsize=8)
+    ax.set_title(title)
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved heatmap to {save_path}")
+
+
 def generate_prediction_heatmaps(
     preds_path: Path,
     true_path: Path,
@@ -217,7 +306,7 @@ def generate_prediction_heatmaps(
         print("matplotlib is not installed; heatmap generation is skipped.")
         return
 
-    trait_ids = resolve_trait_ids(preds.shape[1])
+    trait_ids = resolve_trait_ids(TRAIT_DIR, preds.shape[1])
     trait_index = min(max(trait_index, 0), preds.shape[1] - 1)
     n_samples = min(n_samples, preds.shape[0])
 
@@ -299,7 +388,7 @@ def generate_target_correlation_heatmap(
     flat_targets = targets.transpose(0, 2, 3, 1).reshape(-1, N_TRAITS)
     corr = _pairwise_corr_matrix(flat_targets)
 
-    trait_ids = resolve_trait_ids(N_TRAITS)
+    trait_ids = resolve_trait_ids(TRAIT_DIR, N_TRAITS)
     save_path = save_dir / f"target_correlation_{split}_{source_filter}.png"
     corr_ordered, ordered_trait_ids, order = _plot_matrix(
         corr,
@@ -307,31 +396,145 @@ def generate_target_correlation_heatmap(
         save_path,
         title=f"Target correlation ({split}, {source_filter})",
     )
-    np.save(save_dir / f"target_correlation_{split}_{source_filter}.npy", corr)
-    np.save(
-        save_dir / f"target_correlation_{split}_{source_filter}_ordered.npy",
-        corr_ordered,
+    stem = f"target_correlation_{split}_{source_filter}"
+    _save_score_bundle(
+        save_dir,
+        stem,
+        metric_name="target_correlation",
+        matrix=corr,
+        ordered_matrix=corr_ordered,
+        trait_ids=trait_ids,
+        ordered_trait_ids=ordered_trait_ids,
+        order=order,
+        split=split,
+        source_filter=source_filter,
+        n_batches=None if n_batches is None else int(n_batches),
     )
-    with open(
-        save_dir / f"target_correlation_{split}_{source_filter}_order.txt", "w"
-    ) as handle:
-        handle.write("\n".join(ordered_trait_ids) + "\n")
 
-    pairs = []
-    for i in range(N_TRAITS):
-        for j in range(i + 1, N_TRAITS):
-            if np.isfinite(corr[i, j]):
-                pairs.append((corr[i, j], trait_ids[i], trait_ids[j]))
+    pairs = build_pair_records(corr, trait_ids)
 
     print("Top correlated target pairs:")
-    for score, name_a, name_b in sorted(pairs, reverse=True)[:10]:
-        print(f"  {name_a:<8} <-> {name_b:<8}  r={score:.3f}")
+    for record in sorted(pairs, key=lambda item: item["score"], reverse=True)[:10]:
+        print(
+            f"  {record['trait_a']:<8} <-> {record['trait_b']:<8}  r={record['score']:.3f}"
+        )
 
     print("Top anti-correlated target pairs:")
-    for score, name_a, name_b in sorted(pairs)[:10]:
-        print(f"  {name_a:<8} <-> {name_b:<8}  r={score:.3f}")
+    for record in sorted(pairs, key=lambda item: item["score"])[:10]:
+        print(
+            f"  {record['trait_a']:<8} <-> {record['trait_b']:<8}  r={record['score']:.3f}"
+        )
 
     return corr
+
+
+def generate_gate_weight_analysis(
+    checkpoint_path: Path,
+    save_dir: Path,
+    split: str = "val",
+    n_batches: int = 10,
+) -> dict:
+    """Generate gate usage diagnostics for MMoE checkpoints."""
+    save_dir.mkdir(parents=True, exist_ok=True)
+    device = torch.device(DEVICE)
+    dataloader = get_mtl_dataloader(
+        ZARR_DIR,
+        split,
+        PREDICTORS,
+        TARGETS,
+        BATCH_SIZE,
+        NUM_WORKERS,
+    )
+
+    model = build_model(
+        MODEL_TYPE,
+        IN_CHANNELS,
+        N_TRAITS,
+        BASE_CHANNELS,
+        NORM,
+        DROPOUT_P,
+        STRIDE_BLOCKS,
+        N_EXPERTS,
+        EXPERT_HIDDEN,
+        GATE_TEMPERATURE,
+        GATE_TOP_K,
+    ).to(device)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    all_gate_weights = []
+    with torch.no_grad():
+        for batch_idx, (X, _) in enumerate(dataloader):
+            if batch_idx >= n_batches:
+                break
+            X = torch.nan_to_num(X.to(device=device, dtype=torch.float32))
+            _ = model(X)
+            gate_weights = getattr(model, "last_gate_weights", None)
+            if gate_weights is not None:
+                all_gate_weights.append(gate_weights.cpu().numpy())
+
+    if not all_gate_weights:
+        raise RuntimeError("Gate weights are only available for the MMoE model.")
+
+    gate_weights = np.concatenate(all_gate_weights, axis=0)
+    np.save(save_dir / f"gate_weights_{MODEL_TYPE}_{split}.npy", gate_weights)
+
+    trait_ids = resolve_trait_ids(TRAIT_DIR, N_TRAITS)
+    gate_summary = summarize_gate_weights(gate_weights, trait_ids)
+    with open(save_dir / f"gate_summary_{MODEL_TYPE}_{split}.json", "w") as handle:
+        json.dump(
+            {
+                key: value
+                for key, value in gate_summary.items()
+                if not key.startswith("_")
+            },
+            handle,
+            indent=2,
+        )
+
+    mean_gate_weights = gate_summary["_mean_gate_weights_array"]
+    gate_similarity = gate_summary["_gate_similarity_array"]
+    _plot_rect_matrix(
+        mean_gate_weights,
+        trait_ids,
+        [f"expert_{idx}" for idx in range(mean_gate_weights.shape[1])],
+        save_dir / f"gate_profile_{MODEL_TYPE}_{split}.png",
+        title=f"Mean gate weights ({MODEL_TYPE}, {split})",
+        vmin=0.0,
+        vmax=1.0,
+    )
+
+    save_path = save_dir / f"gate_similarity_{MODEL_TYPE}_{split}.png"
+    similarity_ordered, ordered_trait_ids, order = _plot_matrix(
+        gate_similarity,
+        trait_ids,
+        save_path,
+        title=f"Gate similarity ({MODEL_TYPE}, {split})",
+    )
+    _save_score_bundle(
+        save_dir,
+        f"gate_similarity_{MODEL_TYPE}_{split}",
+        metric_name="gate_similarity",
+        matrix=gate_similarity,
+        ordered_matrix=similarity_ordered,
+        trait_ids=trait_ids,
+        ordered_trait_ids=ordered_trait_ids,
+        order=order,
+        split=split,
+        n_batches=int(n_batches),
+        mean_gate_weights=matrix_to_jsonable(mean_gate_weights),
+        expert_usage_mean=gate_summary["expert_usage_mean"],
+        mean_entropy=gate_summary["mean_entropy"],
+    )
+
+    print("Top gate-similar trait pairs:")
+    for record in gate_summary["top_positive_pairs"][:10]:
+        print(
+            f"  {record['trait_a']:<8} <-> {record['trait_b']:<8}  cos={record['score']:.3f}"
+        )
+
+    return gate_summary
 
 
 def generate_heatmaps(
@@ -406,6 +609,8 @@ def generate_gradient_similarity_heatmap(
         STRIDE_BLOCKS,
         N_EXPERTS,
         EXPERT_HIDDEN,
+        GATE_TEMPERATURE,
+        GATE_TOP_K,
     ).to(device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -463,7 +668,7 @@ def generate_gradient_similarity_heatmap(
     similarity[invalid, :] = np.nan
     similarity[:, invalid] = np.nan
 
-    trait_ids = resolve_trait_ids(N_TRAITS)
+    trait_ids = resolve_trait_ids(TRAIT_DIR, N_TRAITS)
     save_path = save_dir / f"gradient_similarity_{MODEL_TYPE}_{source_filter}.png"
     similarity_ordered, ordered_trait_ids, order = _plot_matrix(
         similarity,
@@ -472,32 +677,37 @@ def generate_gradient_similarity_heatmap(
         title=f"Gradient similarity ({MODEL_TYPE}, {source_filter})",
     )
 
-    pairs = []
-    for i in range(N_TRAITS):
-        for j in range(i + 1, N_TRAITS):
-            if np.isfinite(similarity[i, j]):
-                pairs.append((similarity[i, j], trait_ids[i], trait_ids[j]))
+    stem = f"gradient_similarity_{MODEL_TYPE}_{source_filter}"
+    _save_score_bundle(
+        save_dir,
+        stem,
+        metric_name="gradient_similarity",
+        matrix=similarity,
+        ordered_matrix=similarity_ordered,
+        trait_ids=trait_ids,
+        ordered_trait_ids=ordered_trait_ids,
+        order=order,
+        model_type=MODEL_TYPE,
+        split=split,
+        source_filter=source_filter,
+        checkpoint_path=str(checkpoint_path),
+        n_batches=int(n_batches),
+        gradient_counts=[int(count) for count in grad_count.tolist()],
+    )
+
+    pairs = build_pair_records(similarity, trait_ids)
 
     print("Top positive trait pairs:")
-    for score, name_a, name_b in sorted(pairs, reverse=True)[:10]:
-        print(f"  {name_a:<8} <-> {name_b:<8}  cos={score:.3f}")
+    for record in sorted(pairs, key=lambda item: item["score"], reverse=True)[:10]:
+        print(
+            f"  {record['trait_a']:<8} <-> {record['trait_b']:<8}  cos={record['score']:.3f}"
+        )
 
     print("Top negative trait pairs:")
-    for score, name_a, name_b in sorted(pairs)[:10]:
-        print(f"  {name_a:<8} <-> {name_b:<8}  cos={score:.3f}")
-
-    np.save(
-        save_dir / f"gradient_similarity_{MODEL_TYPE}_{source_filter}.npy", similarity
-    )
-    np.save(
-        save_dir / f"gradient_similarity_{MODEL_TYPE}_{source_filter}_ordered.npy",
-        similarity_ordered,
-    )
-    with open(
-        save_dir / f"gradient_similarity_{MODEL_TYPE}_{source_filter}_order.txt",
-        "w",
-    ) as handle:
-        handle.write("\n".join(ordered_trait_ids) + "\n")
+    for record in sorted(pairs, key=lambda item: item["score"])[:10]:
+        print(
+            f"  {record['trait_a']:<8} <-> {record['trait_b']:<8}  cos={record['score']:.3f}"
+        )
     return similarity
 
 
@@ -507,7 +717,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["pred", "grad", "corr", "all"],
+        choices=["pred", "grad", "corr", "gates", "all"],
         default="grad",
     )
     parser.add_argument("--preds-path", type=Path, default=DEFAULT_PREDS_PATH)
@@ -553,6 +763,14 @@ def main() -> None:
             split=args.split,
             n_batches=args.n_batches,
             source_filter=args.source_filter,
+        )
+
+    if args.mode in {"gates", "all"}:
+        generate_gate_weight_analysis(
+            args.checkpoint_path,
+            args.output_dir / "gate_analysis",
+            split=args.split,
+            n_batches=args.n_batches,
         )
 
 
