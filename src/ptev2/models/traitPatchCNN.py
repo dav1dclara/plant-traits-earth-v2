@@ -132,6 +132,7 @@ class ResPatchCNN(nn.Module):
         gn_groups: int = 8,
         stride_blocks: tuple[int, int, int, int] = (1, 1, 1, 1),
         dropout_p: float = 0.0,
+        head_depth: int = 2,
     ) -> None:
         super().__init__()
         # Backward compatibility: old configs/scripts may still pass n_traits.
@@ -187,8 +188,22 @@ class ResPatchCNN(nn.Module):
             dropout_p=dropout_p,
         )
 
-        # Per-pixel prediction head
-        self.head = nn.Conv2d(c3, out_channels, kernel_size=1, bias=True)
+        # Per-pixel prediction head (deeper head for better per-trait learning)
+        head_layers = []
+        in_features = c3
+        for _ in range(max(1, head_depth - 1)):
+            head_layers.append(
+                nn.Conv2d(in_features, c3, kernel_size=3, padding=1, bias=False)
+            )
+            head_layers.append(_make_norm(norm, c3, gn_groups=gn_groups))
+            head_layers.append(nn.PReLU(num_parameters=c3))
+            head_layers.append(nn.Dropout2d(dropout_p))
+            in_features = c3
+
+        head_layers.append(
+            nn.Conv2d(in_features, out_channels, kernel_size=1, bias=True)
+        )
+        self.head = nn.Sequential(*head_layers)
 
         self.in_channels = in_channels
         self.out_channels = out_channels

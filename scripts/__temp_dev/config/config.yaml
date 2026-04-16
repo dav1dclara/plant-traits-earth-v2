@@ -1,0 +1,8 @@
+defaults:
+  - paths: default
+  - models: default
+  - training: default
+  - evaluation: default
+  - prediction: default
+  - wandb: default
+  - _self_
