@@ -1,25 +1,18 @@
 import json
-import math
 from pathlib import Path
 
 import hydra
 import numpy as np
 import torch
-import wandb
+import zarr
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
-from sklearn.metrics import mean_squared_error
 from tqdm import tqdm
 
 from ptev2.data.dataloader import get_dataloader
 from ptev2.metrics.aoa import collect_patch_features, compute_aoa_metrics
-from ptev2.metrics.core import pearson_r as pearson_r_metric
-from ptev2.metrics.core import r2_score
-from ptev2.utils import (
-    checkpoint_paths_from_cfg,
-    run_name_from_cfg,
-    seed_all,
-)
+from ptev2.metrics.evaluation import summarize_single_trait_metrics
+from ptev2.utils import seed_all
 
 
 def _infer_checkpoint_output_channels(
@@ -35,152 +28,175 @@ def _infer_checkpoint_output_channels(
 
 
 def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
-    checkpoint_override = cfg.evaluation.checkpoint_path
-    if checkpoint_override:
-        return Path(str(checkpoint_override))
-
-    best_path, last_path = checkpoint_paths_from_cfg(cfg)
-    if best_path.exists():
-        return best_path
-    return last_path
+    checkpoint_override = OmegaConf.select(cfg, "checkpoint_path")
+    if not checkpoint_override:
+        checkpoint_override = OmegaConf.select(cfg, "evaluation.checkpoint_path")
+    if not checkpoint_override:
+        raise ValueError("Set checkpoint_path to evaluate a single checkpoint.")
+    return Path(str(checkpoint_override))
 
 
-def _target_layout_from_cfg(
-    cfg: DictConfig,
-) -> tuple[int, list[str], list[int], list[int]]:
-    target_cfg = cfg.training.data.targets
-    available_statistics = [str(v) for v in target_cfg.available_statistics]
-    selected_statistics = [str(v) for v in target_cfg.selected_statistics]
-    source_statistic = str(target_cfg.source_statistic)
-
-    if not available_statistics:
-        raise ValueError("training.data.target.available_statistics must not be empty.")
-    if not selected_statistics:
-        raise ValueError("training.data.target.selected_statistics must not be empty.")
-    if source_statistic not in available_statistics:
+def _load_checkpoint_and_config(
+    checkpoint_path: Path, device: torch.device
+) -> tuple[dict, DictConfig]:
+    state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if not isinstance(state, dict):
         raise ValueError(
-            f"source_statistic='{source_statistic}' not in {available_statistics}"
+            f"Checkpoint '{checkpoint_path}' did not contain a dict state."
         )
 
-    selected_trait_ids = (
-        [int(v) for v in target_cfg.trait_ids] if target_cfg.trait_ids else []
-    )
-    n_traits = (
-        len(selected_trait_ids) if selected_trait_ids else int(target_cfg.n_traits)
-    )
-    if n_traits <= 0:
-        raise ValueError("training.data.target.n_traits must be > 0.")
-
-    stats_per_trait = len(available_statistics)
-    stat_to_idx = {name: idx for idx, name in enumerate(available_statistics)}
-    target_indices: list[int] = []
-    source_indices: list[int] = []
-    for trait_pos in range(n_traits):
-        for stat_name in selected_statistics:
-            target_indices.append(trait_pos * stats_per_trait + stat_to_idx[stat_name])
-        source_indices.append(
-            trait_pos * stats_per_trait + stat_to_idx[source_statistic]
-        )
-
-    return n_traits, selected_statistics, target_indices, source_indices
-
-
-def _split_target_and_source(
-    y_full: torch.Tensor,
-    target_indices: list[int],
-    source_indices: list[int],
-    valid_source_values: list[int],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if y_full.ndim != 4:
+    training_cfg = state.get("config")
+    if training_cfg is None:
         raise ValueError(
-            f"Expected y_full shape (B, C, H, W), got {tuple(y_full.shape)}"
+            f"Checkpoint '{checkpoint_path}' does not contain embedded training config under 'config'."
         )
 
-    y_target = y_full[:, target_indices]
-    source_mask_raw = (
-        torch.nan_to_num(y_full[:, source_indices], nan=0.0).round().to(torch.int64)
-    )
-    source_mask = torch.zeros_like(source_mask_raw)
-    for value in valid_source_values:
-        source_mask = torch.where(
-            source_mask_raw == int(value),
-            source_mask_raw,
-            source_mask,
+    return state, OmegaConf.create(training_cfg)
+
+
+def _build_target_layout_from_train_cfg(
+    train_cfg: DictConfig,
+    train_store: zarr.Group,
+) -> tuple[str, list[str], list[str], list[int], list[int], int]:
+    target_cfg = train_cfg.data.targets
+    target_dataset = str(target_cfg.dataset)
+
+    zarr_dataset_names = list(train_store["targets"].keys())
+    if target_dataset not in zarr_dataset_names:
+        raise ValueError(
+            f"Dataset '{target_dataset}' not found in zarr. Available: {', '.join(zarr_dataset_names)}"
         )
-    return y_target, source_mask
+
+    zarr_band_names = [str(v) for v in train_store["targets"].attrs["band_names"]]
+    band_to_idx = {name: idx for idx, name in enumerate(zarr_band_names)}
+
+    zarr_all_traits = [
+        str(f).replace("X", "").replace(".tif", "")
+        for f in train_store[f"targets/{target_dataset}"].attrs["files"]
+    ]
+    traits = (
+        [str(v) for v in target_cfg.traits] if target_cfg.traits else zarr_all_traits
+    )
+    if not traits:
+        raise ValueError("data.targets.traits must not be empty after resolution.")
+    for trait in traits:
+        if trait not in zarr_all_traits:
+            raise ValueError(
+                f"Trait '{trait}' not found in dataset '{target_dataset}' in zarr."
+            )
+
+    cfg_bands = [str(v) for v in target_cfg.bands]
+    if not cfg_bands:
+        raise ValueError("data.targets.bands must not be empty.")
+    for band in cfg_bands:
+        if band not in band_to_idx:
+            raise ValueError(
+                f"Band '{band}' not found in zarr. Available: {', '.join(zarr_band_names)}"
+            )
+
+    n_bands = len(zarr_band_names)
+    target_indices = [
+        trait_pos * n_bands + band_to_idx[band]
+        for trait_pos in range(len(traits))
+        for band in cfg_bands
+    ]
+    source_indices = [
+        trait_pos * n_bands + band_to_idx["source"] for trait_pos in range(len(traits))
+    ]
+
+    return (
+        target_dataset,
+        traits,
+        cfg_bands,
+        target_indices,
+        source_indices,
+        len(traits),
+    )
+
+
+def _resolve_train_zarr_dir(train_cfg: DictConfig) -> Path:
+    return (
+        Path(str(train_cfg.data.root_dir))
+        / f"{train_cfg.data.resolution_km}km"
+        / "chips"
+        / f"patch{train_cfg.data.patch_size}_stride{train_cfg.data.stride}"
+    )
 
 
 def evaluate_model(cfg: DictConfig) -> dict:
-    train_cfg = cfg.training.train
-    seed_all(int(train_cfg.seed))
+    checkpoint_path = _resolve_checkpoint_path(cfg)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA ist erforderlich, aber nicht verfuegbar.")
     device = torch.device("cuda")
     print(f"Using device: {device}")
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    run = None
-    if cfg.wandb.enabled:
-        eval_run_name = f"eval_{run_name_from_cfg(cfg)}"
-        try:
-            run = wandb.init(
-                project=cfg.wandb.project,
-                entity=cfg.wandb.entity,
-                name=eval_run_name,
-                job_type="evaluation",
-                config=OmegaConf.to_container(cfg, resolve=False),
-                reinit="finish_previous",
-            )
-            print(f"W&B eval run started: {eval_run_name}")
-        except Exception as exc:
-            print(f"W&B init failed ({exc}). Continuing without W&B logging.")
-            run = None
+    state, train_cfg = _load_checkpoint_and_config(checkpoint_path, device)
+    seed_all(int(train_cfg.train.seed))
 
-    predictors = [k for k, v in cfg.training.data.predictors.items() if v.use]
+    predictors = [k for k, v in train_cfg.data.predictors.items() if v.use]
     if not predictors:
-        raise ValueError("No predictors enabled in cfg.training.data.predictors.")
+        raise ValueError("No predictors enabled in checkpoint training config.")
 
-    n_traits, selected_statistics, target_channel_indices, source_indices = (
-        _target_layout_from_cfg(cfg)
+    zarr_dir = _resolve_train_zarr_dir(train_cfg)
+    train_store = zarr.open_group(str(zarr_dir / "train.zarr"), mode="r")
+    test_zarr_dir_cfg = OmegaConf.select(cfg, "test_zarr_dir")
+    if test_zarr_dir_cfg is None:
+        test_zarr_dir_cfg = OmegaConf.select(cfg, "evaluation.test_zarr_dir")
+    test_zarr_dir = Path(str(test_zarr_dir_cfg)) if test_zarr_dir_cfg else zarr_dir
+    test_split = str(
+        OmegaConf.select(cfg, "test_split")
+        or OmegaConf.select(cfg, "evaluation.test_split")
+        or "test"
+    )
+    batch_size = int(train_cfg.data_loaders.batch_size)
+    num_workers = int(train_cfg.data_loaders.num_workers)
+
+    (
+        target_dataset,
+        traits,
+        selected_bands,
+        target_channel_indices,
+        source_indices,
+        n_traits,
+    ) = _build_target_layout_from_train_cfg(
+        train_cfg,
+        train_store,
     )
     print(
         "Target layout: "
         f"traits={n_traits}, "
-        f"selected_statistics={selected_statistics}, "
+        f"selected_bands={selected_bands}, "
         f"output_channels={len(target_channel_indices)}"
     )
-
-    source_encoding_cfg = cfg.training.data.targets.source_encoding
-    source_valid_values = sorted(
-        {
-            int(source_encoding_cfg.gbif),
-            int(source_encoding_cfg.splot),
-        }
-    )
-
-    zarr_dir = Path(cfg.training.data.zarr_dir)
-    test_zarr_dir_cfg = cfg.evaluation.test_zarr_dir
-    test_zarr_dir = Path(str(test_zarr_dir_cfg)) if test_zarr_dir_cfg else zarr_dir
-    batch_size = int(cfg.training.data_loaders.batch_size)
-    num_workers = int(cfg.training.data_loaders.num_workers)
-    test_split = str(cfg.evaluation.test_split)
 
     test_loader = get_dataloader(
         zarr_dir=test_zarr_dir,
         split=test_split,
         predictors=predictors,
-        target=str(cfg.training.data.targets.source),
+        target=target_dataset,
+        target_indices=target_channel_indices,
+        source_indices=source_indices,
         batch_size=batch_size,
         num_workers=num_workers,
     )
 
-    compute_aoa = bool(cfg.evaluation.compute_aoa)
+    compute_aoa = bool(
+        OmegaConf.select(cfg, "compute_aoa")
+        if OmegaConf.select(cfg, "compute_aoa") is not None
+        else OmegaConf.select(cfg, "evaluation.compute_aoa") or False
+    )
     aoa_metrics = None
     if compute_aoa:
+        train_split = str(train_cfg.data.get("train_split", "train"))
         train_loader = get_dataloader(
             zarr_dir=zarr_dir,
-            split=str(cfg.training.data.train_split),
+            split=train_split,
             predictors=predictors,
-            target=str(cfg.training.data.targets.source),
+            target=target_dataset,
+            target_indices=target_channel_indices,
+            source_indices=source_indices,
             batch_size=batch_size,
             num_workers=num_workers,
         )
@@ -188,22 +204,11 @@ def evaluate_model(cfg: DictConfig) -> dict:
         test_features = collect_patch_features(test_loader, device=device)
         aoa_metrics = compute_aoa_metrics(train_features, test_features, q=0.95)
 
-    checkpoint_path = _resolve_checkpoint_path(cfg)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint not found: {checkpoint_path}. "
-            "Pass a custom path with +evaluation.checkpoint_path=/path/to/model.pth"
-        )
+    checkpoint_state = state.get("state_dict", state)
+    if not isinstance(checkpoint_state, dict):
+        raise ValueError(f"Checkpoint state for '{checkpoint_path}' is invalid.")
 
-    state = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    if (
-        isinstance(state, dict)
-        and "state_dict" in state
-        and isinstance(state["state_dict"], dict)
-    ):
-        state = state["state_dict"]
-
-    checkpoint_output_channels = _infer_checkpoint_output_channels(state)
+    checkpoint_output_channels = _infer_checkpoint_output_channels(checkpoint_state)
     if checkpoint_output_channels is not None and checkpoint_output_channels != len(
         target_channel_indices
     ):
@@ -213,30 +218,27 @@ def evaluate_model(cfg: DictConfig) -> dict:
             f"expected_output_channels={len(target_channel_indices)}."
         )
 
-    model = instantiate(cfg.models.active, out_channels=len(target_channel_indices)).to(
-        device
-    )
-    model.load_state_dict(state)
+    total_pred_bands = 0
+    for predictor in predictors:
+        total_pred_bands += train_store[f"predictors/{predictor}"].shape[1]
+    model = instantiate(
+        train_cfg.models,
+        in_channels=total_pred_bands,
+        out_channels=len(target_channel_indices),
+    ).to(device)
+    model.load_state_dict(checkpoint_state)
     model.eval()
 
     all_y_true: list[np.ndarray] = []
     all_y_pred: list[np.ndarray] = []
+    all_src: list[np.ndarray] = []
     skipped_batches = 0
 
-    splot_code = int(cfg.training.data.targets.source_encoding.splot)
-    splot_y_true: list[np.ndarray] = []
-    splot_y_pred: list[np.ndarray] = []
-
     with torch.no_grad():
-        for X, y_full in tqdm(test_loader, desc=f"Evaluating [{test_split}]"):
+        for X, y, src in tqdm(test_loader, desc=f"Evaluating [{checkpoint_path.stem}]"):
             X = torch.nan_to_num(X.to(device=device, dtype=torch.float32))
-            y_full = y_full.to(device=device, dtype=torch.float32)
-            y, source_mask = _split_target_and_source(
-                y_full=y_full,
-                target_indices=target_channel_indices,
-                source_indices=source_indices,
-                valid_source_values=source_valid_values,
-            )
+            y = y.to(device=device, dtype=torch.float32)
+            src = src.to(device=device, dtype=torch.float32)
 
             y_pred = model(X)
             if y_pred.shape != y.shape:
@@ -244,91 +246,153 @@ def evaluate_model(cfg: DictConfig) -> dict:
                     f"Shape mismatch: y_pred={tuple(y_pred.shape)} vs y={tuple(y.shape)}"
                 )
 
-            valid = torch.isfinite(y_pred) & torch.isfinite(y) & (source_mask > 0)
+            valid = torch.isfinite(y_pred) & torch.isfinite(y) & (src > 0)
             if not bool(valid.any()):
                 skipped_batches += 1
                 continue
 
-            all_y_pred.append(y_pred[valid].detach().cpu().numpy())
-            all_y_true.append(y[valid].detach().cpu().numpy())
-
-            valid_splot = (
-                torch.isfinite(y_pred) & torch.isfinite(y) & (source_mask == splot_code)
-            )
-            if bool(valid_splot.any()):
-                splot_y_pred.append(y_pred[valid_splot].detach().cpu().numpy())
-                splot_y_true.append(y[valid_splot].detach().cpu().numpy())
+            all_y_pred.append(y_pred.detach().cpu().numpy())
+            all_y_true.append(y.detach().cpu().numpy())
+            all_src.append(src.detach().cpu().numpy())
 
     if all_y_true:
-        y_true_vec = np.concatenate(all_y_true)
-        y_pred_vec = np.concatenate(all_y_pred)
-        n_valid = int(y_true_vec.size)
-        r2 = float(r2_score(y_true_vec, y_pred_vec))
-        pearson_r = float(pearson_r_metric(y_true_vec, y_pred_vec))
-    else:
-        n_valid = 0
-        r2 = float("nan")
-        pearson_r = float("nan")
-
-    if splot_y_true:
-        y_true_splot = np.concatenate(splot_y_true)
-        y_pred_splot = np.concatenate(splot_y_pred)
-        splot_count = int(y_true_splot.size)
-        rmse_splot_overall = float(
-            math.sqrt(mean_squared_error(y_true_splot, y_pred_splot))
+        y_true_stack = np.concatenate(all_y_true, axis=0)
+        y_pred_stack = np.concatenate(all_y_pred, axis=0)
+        src_stack = np.concatenate(all_src, axis=0)
+        metric_summary = summarize_single_trait_metrics(
+            y_true=y_true_stack,
+            y_pred=y_pred_stack,
+            source_mask=src_stack,
+            trait_names=traits,
+            n_bands=len(selected_bands),
         )
     else:
-        splot_count = 0
-        rmse_splot_overall = float("nan")
+        metric_summary = {
+            "rmse": float("nan"),
+            "r2": float("nan"),
+            "pearson_r": float("nan"),
+            "n_valid": 0,
+            "cov": float("nan"),
+            "cov_mean": float("nan"),
+            "cov_median": float("nan"),
+            "cov_p95": float("nan"),
+            "cov_n": 0.0,
+            "trait_metrics": {},
+        }
 
-    results = {
+    results_item = {
         "checkpoint": str(checkpoint_path),
         "device": str(device),
         "split": test_split,
-        "n_valid": n_valid,
+        "n_valid": int(metric_summary["n_valid"]),
         "skipped_batches": skipped_batches,
-        "r2": r2,
-        "pearson_r": pearson_r,
-        "rmse_splot_overall": rmse_splot_overall,
-        "n_splot_valid": int(splot_count),
+        "rmse": metric_summary["rmse"],
+        "r2": metric_summary["r2"],
+        "pearson_r": metric_summary["pearson_r"],
+        "cov": metric_summary["cov"],
+        "cov_mean": metric_summary["cov_mean"],
+        "cov_median": metric_summary["cov_median"],
+        "cov_p95": metric_summary["cov_p95"],
+        "cov_n": metric_summary["cov_n"],
+        "trait_metrics": metric_summary["trait_metrics"],
     }
     if aoa_metrics is not None:
-        results.update(aoa_metrics)
+        results_item.update(aoa_metrics)
 
-    output_path_cfg = cfg.evaluation.output_path
-    output_path = (
-        Path(str(output_path_cfg))
-        if output_path_cfg
-        else checkpoint_path.with_suffix(".test_metrics.json")
-    )
-    if not output_path.parent.exists():
-        raise FileNotFoundError(
-            f"Evaluation output directory does not exist: {output_path.parent}. "
-            "Create it explicitly or set evaluation.output_path to an existing directory."
-        )
+    output_dir_cfg = OmegaConf.select(cfg, "output_dir")
+    if output_dir_cfg is None:
+        output_dir_cfg = OmegaConf.select(cfg, "evaluation.output_dir")
+    output_dir = Path(str(output_dir_cfg)) if output_dir_cfg else checkpoint_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{checkpoint_path.stem}.test_metrics.json"
     with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(results, handle, indent=2)
+        json.dump(results_item, handle, indent=2)
 
     print("Evaluation finished")
     print(f"  checkpoint: {checkpoint_path}")
     print(f"  train_zarr:  {zarr_dir}")
     print(f"  test_zarr:   {test_zarr_dir}")
     print(f"  split:      {test_split}")
-    print(f"  n_valid:    {n_valid}")
-    print(f"  r2:         {r2:.6f}")
-    print(f"  pearson_r:  {pearson_r:.6f}")
-    print(f"  rmse_splot: {rmse_splot_overall:.6f}")
+    print(f"  n_valid:    {metric_summary['n_valid']}")
+    print(f"  rmse:       {metric_summary['rmse']:.6f}")
+    print(f"  r2:         {metric_summary['r2']:.6f}")
+    print(f"  pearson_r:  {metric_summary['pearson_r']:.6f}")
+    print(f"  cov_mean:   {metric_summary['cov_mean']:.6f}")
+    for trait_name, trait_result in metric_summary["trait_metrics"].items():
+        print(
+            f"  trait={trait_name}: rmse={trait_result['rmse']:.6f}, r2={trait_result['r2']:.6f}, pearson_r={trait_result['pearson_r']:.6f}, cov={trait_result['cov']:.6f}"
+        )
     print(f"  metrics:    {output_path}")
 
-    if run is not None:
-        wandb.log(results)
-        run.summary["metrics_file"] = str(output_path)
-        run.finish()
+    wandb_enabled_cfg = OmegaConf.select(cfg, "wandb.enabled")
+    wandb_enabled_train = OmegaConf.select(train_cfg, "wandb.enabled")
+    wandb_enabled = bool(
+        wandb_enabled_cfg
+        if wandb_enabled_cfg is not None
+        else (wandb_enabled_train if wandb_enabled_train is not None else False)
+    )
 
-    return results
+    if wandb_enabled:
+        import wandb
+
+        base_run_name = OmegaConf.select(train_cfg, "train.run_name")
+        if not base_run_name:
+            base_run_name = checkpoint_path.stem
+        run_name = f"eval_{base_run_name}"
+
+        wandb_project = OmegaConf.select(cfg, "wandb.project") or OmegaConf.select(
+            train_cfg, "wandb.project"
+        )
+        wandb_entity = OmegaConf.select(cfg, "wandb.entity") or OmegaConf.select(
+            train_cfg, "wandb.entity"
+        )
+
+        if not wandb_project or not wandb_entity:
+            print(
+                "W&B logging skipped: missing wandb.project or wandb.entity in config."
+            )
+            return results_item
+
+        try:
+            run = wandb.init(
+                project=str(wandb_project),
+                entity=str(wandb_entity),
+                name=run_name,
+                job_type="evaluation",
+                config={
+                    "checkpoint": str(checkpoint_path),
+                    "test_split": test_split,
+                    "output_path": str(output_path),
+                    "train_config": OmegaConf.to_container(train_cfg, resolve=True),
+                    "evaluation_config": OmegaConf.to_container(cfg, resolve=True),
+                },
+                reinit=True,
+            )
+            wandb.log(results_item)
+            for trait_name, trait_result in metric_summary["trait_metrics"].items():
+                wandb.log(
+                    {
+                        f"trait/{trait_name}/rmse": trait_result["rmse"],
+                        f"trait/{trait_name}/r2": trait_result["r2"],
+                        f"trait/{trait_name}/pearson_r": trait_result["pearson_r"],
+                        f"trait/{trait_name}/cov": trait_result["cov"],
+                        f"trait/{trait_name}/cov_mean": trait_result["cov_mean"],
+                        f"trait/{trait_name}/cov_median": trait_result["cov_median"],
+                        f"trait/{trait_name}/cov_p95": trait_result["cov_p95"],
+                    }
+                )
+            run.summary["metrics_file"] = str(output_path)
+            run.summary["checkpoint"] = str(checkpoint_path)
+            run.finish()
+        except Exception as exc:
+            print(f"W&B init/log failed for {checkpoint_path}: {exc}")
+
+    return results_item
 
 
-@hydra.main(version_base=None, config_path="../config", config_name="config")
+@hydra.main(
+    version_base=None, config_path="../config", config_name="evaluation/default"
+)
 def main(cfg: DictConfig) -> None:
     evaluate_model(cfg)
 

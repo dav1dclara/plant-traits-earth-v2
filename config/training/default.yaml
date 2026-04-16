@@ -32,8 +32,9 @@ data_loaders:
 
 train:
   seed: 0
+  run_name: null
+  group: null
   epochs: 50
-  # run_name: null
 
   optimizer:
     _target_: torch.optim.Adam

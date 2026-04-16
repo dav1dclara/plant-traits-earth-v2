@@ -1,5 +1,13 @@
-compute_aoa: true
-checkpoint_path: null
-output_path: null
+defaults:
+  - _self_
+
+checkpoint_path: /scratch3/plant-traits-v2/checkpoints/vibrant-puddle-80.pth
+output_dir: /scratch3/plant-traits-v2/eval_metrics/
 test_zarr_dir: null
-test_split: ${training.data.test_split}
+test_split: test
+compute_aoa: true
+
+wandb:
+  enabled: true
+  entity: plant-traits-v2
+  project: Project_PTV2

@@ -6,9 +6,7 @@ paths:
 
 settings:
   patch_size: 15
-  stride: 10        # train and val
-  stride_test: 15   # test: non-overlapping (= patch_size)
-  stride_all: 15
+  stride: 10
   save_all: true
 
 data:
