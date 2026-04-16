@@ -44,6 +44,13 @@ def rmse(y_true: Any, y_pred: Any) -> float:
     return float(np.sqrt(mean_squared_error(yt, yp)))
 
 
+def mae(y_true: Any, y_pred: Any) -> float:
+    yt, yp = _mask_finite_pairs(y_true, y_pred)
+    if yt.size == 0:
+        return float(np.nan)
+    return float(np.mean(np.abs(yt - yp)))
+
+
 def r2_score(y_true: Any, y_pred: Any) -> float:
     """Coefficient of determination computed on finite pairs only."""
     yt, yp = _mask_finite_pairs(y_true, y_pred)
