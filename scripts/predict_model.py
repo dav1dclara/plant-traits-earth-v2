@@ -1,9 +1,12 @@
+import json
+import re
 from pathlib import Path
 
 import hydra
 import numpy as np
 import rasterio
 import torch
+import zarr
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from rasterio.windows import Window
@@ -21,7 +24,7 @@ def _list_predictor_files(cfg: DictConfig) -> list[Path]:
     if predictors_root_cfg:
         predictors_root = Path(str(predictors_root_cfg))
     else:
-        predictors_root = Path(cfg.paths.data_root_dir) / "22km" / "eo_data_processed"
+        predictors_root = Path(cfg.paths.data_dir) / "22km" / "eo_data_processed"
 
     selected_predictors = [
         name for name, pred_cfg in cfg.training.data.predictors.items() if pred_cfg.use
@@ -49,11 +52,26 @@ def _resolve_reference_tif(cfg: DictConfig) -> Path:
             raise FileNotFoundError(f"prediction.reference_tif does not exist: {ref}")
         return ref
 
-    target_source = str(cfg.training.data.target.source)
-    source_dir = Path(cfg.paths.data_root_dir) / "22km" / target_source
+    target_source = str(cfg.training.data.targets.source)
+    source_dir = Path(cfg.paths.data_dir) / "22km" / target_source
     candidates = sorted(source_dir.glob("X*.tif"))
     if candidates:
         return candidates[0]
+
+    # Fallback: use any available predictor raster if no target tif exists.
+    predictors_root_cfg = cfg.prediction.predictors_dir
+    if predictors_root_cfg:
+        predictors_root = Path(str(predictors_root_cfg))
+    else:
+        predictors_root = Path(cfg.paths.data_dir) / "22km" / "eo_data_processed"
+
+    selected_predictors = [
+        name for name, pred_cfg in cfg.training.data.predictors.items() if pred_cfg.use
+    ]
+    for predictor in selected_predictors:
+        predictor_candidates = sorted((predictors_root / predictor).glob("*.tif"))
+        if predictor_candidates:
+            return predictor_candidates[0]
 
     raise FileNotFoundError(
         "Could not find a default reference tif. "
@@ -106,17 +124,43 @@ def _validate_grids(
     return total_bands
 
 
+def _infer_trait_ids_from_zarr(cfg: DictConfig) -> list[int]:
+    """Infer trait IDs from zarr metadata if cfg does not define trait_ids explicitly."""
+    explicit_trait_ids = cfg.training.data.targets.trait_ids
+    if explicit_trait_ids:
+        return [int(v) for v in explicit_trait_ids]
+
+    zarr_dir = Path(str(cfg.training.data.zarr_dir))
+    split = str(cfg.training.data.train_split)
+    zarr_path = zarr_dir / f"{split}.zarr"
+    target_name = str(cfg.training.data.targets.source)
+    if not zarr_path.exists():
+        return []
+
+    try:
+        store = zarr.open_group(str(zarr_path), mode="r")
+        if f"targets/{target_name}" not in store:
+            return []
+        files = store[f"targets/{target_name}"].attrs.get("files", [])
+        trait_ids: list[int] = []
+        for name in files:
+            m = re.match(r"^X(\d+)\.tif$", str(name))
+            if m:
+                trait_ids.append(int(m.group(1)))
+        return trait_ids
+    except Exception:
+        return []
+
+
 def _target_layout_from_cfg(
     cfg: DictConfig,
 ) -> tuple[int, list[str], int, list[str]]:
-    target_cfg = cfg.training.data.target
+    target_cfg = cfg.training.data.targets
     selected_statistics = [str(v) for v in target_cfg.selected_statistics]
     if not selected_statistics:
         raise ValueError("training.data.target.selected_statistics must not be empty.")
 
-    selected_trait_ids = (
-        [int(v) for v in target_cfg.trait_ids] if target_cfg.trait_ids else []
-    )
+    selected_trait_ids = _infer_trait_ids_from_zarr(cfg)
     n_traits = (
         len(selected_trait_ids) if selected_trait_ids else int(target_cfg.n_traits)
     )
@@ -132,8 +176,42 @@ def _target_layout_from_cfg(
     return n_traits, selected_statistics, out_channels, trait_labels
 
 
+def _write_band_mapping(
+    output_tif: Path,
+    trait_labels: list[str],
+    band_names: list[str],
+) -> Path:
+    """Write explicit band-to-trait mapping as JSON next to output GeoTIFF."""
+    mapping_path = output_tif.with_suffix(".band_mapping.json")
+    records: list[dict[str, object]] = []
+    band_idx = 1
+    for trait_label in trait_labels:
+        trait_id = None
+        if trait_label.startswith("X") and trait_label[1:].isdigit():
+            trait_id = int(trait_label[1:])
+        for statistic in band_names:
+            records.append(
+                {
+                    "band_index": band_idx,
+                    "band_description": f"{trait_label}_{statistic}",
+                    "trait_label": trait_label,
+                    "trait_id": trait_id,
+                    "statistic": statistic,
+                }
+            )
+            band_idx += 1
+
+    payload = {
+        "n_bands": len(records),
+        "records": records,
+    }
+    mapping_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return mapping_path
+
+
 def predict_global(cfg: DictConfig) -> Path:
-    seed_all(cfg.training.seed)
+    train_cfg = cfg.training.train
+    seed_all(int(train_cfg.seed))
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA ist erforderlich, aber nicht verfuegbar.")
@@ -141,8 +219,12 @@ def predict_global(cfg: DictConfig) -> Path:
 
     n_traits, band_names, out_channels, trait_labels = _target_layout_from_cfg(cfg)
 
-    patch_h = int(cfg.data.patch_h)
-    patch_w = int(cfg.data.patch_w)
+    patch_size_cfg = cfg.training.data_loaders.patch_size
+    if patch_size_cfg is not None:
+        patch_h = patch_w = int(patch_size_cfg)
+    else:
+        patch_h = int(cfg.data.patch_h)
+        patch_w = int(cfg.data.patch_w)
     if patch_h != patch_w:
         raise ValueError(f"Only square patches are supported, got {patch_h}x{patch_w}.")
 
@@ -185,10 +267,11 @@ def predict_global(cfg: DictConfig) -> Path:
                 ref_mask = np.isfinite(ref.read(1).astype(np.float32))
 
         total_in_channels = _validate_grids(ref, predictor_files)
-        if total_in_channels != int(cfg.data.in_channels):
+        expected_in_channels = int(cfg.training.data.in_channels)
+        if total_in_channels != expected_in_channels:
             raise ValueError(
                 "Predictor channel count mismatch: "
-                f"cfg.data.in_channels={int(cfg.data.in_channels)} vs actual={total_in_channels}."
+                f"cfg.training.data.in_channels={expected_in_channels} vs actual={total_in_channels}."
             )
 
         state = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -283,10 +366,14 @@ def predict_global(cfg: DictConfig) -> Path:
             output_tif = Path(str(output_cfg))
         else:
             output_tif = (
-                Path(cfg.training.checkpoint.dir)
+                Path(str(cfg.paths.predictions_dir))
                 / f"{run_name_from_cfg(cfg)}_global_prediction.tif"
             )
-        output_tif.parent.mkdir(parents=True, exist_ok=True)
+        if not output_tif.parent.exists():
+            raise FileNotFoundError(
+                f"Prediction output directory does not exist: {output_tif.parent}. "
+                "Create it explicitly or set prediction.output_tif to an existing directory."
+            )
 
         profile = ref.profile.copy()
         profile.update(
@@ -320,6 +407,13 @@ def predict_global(cfg: DictConfig) -> Path:
         "  masks:      "
         f"predictor_valid={apply_predictor_valid_mask}, reference={apply_reference_mask}"
     )
+
+    mapping_path = _write_band_mapping(
+        output_tif=output_tif,
+        trait_labels=trait_labels,
+        band_names=band_names,
+    )
+    print(f"  band_map:   {mapping_path}")
 
     return output_tif
 

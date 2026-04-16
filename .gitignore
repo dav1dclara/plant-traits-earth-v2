@@ -19,6 +19,8 @@ qgis/
 
 # temp code
 scripts/__temp_david/
+
+inference_outputs/
 scripts/__temp_dev/MMoE/
 scripts/__temp_dev/MTL/wandb
 

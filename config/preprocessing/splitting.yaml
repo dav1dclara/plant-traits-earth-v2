@@ -1,10 +1,11 @@
+data_dir: "/scratch3/plant-traits-v2/data/"
+
 targets:
-  root_dir: "/scratch3/plant-traits-v2/data/"
   resolution_km: "22"
   source: "comb"
 
 h3:
-  resolution: 2
+  resolution: 1
 
 splitting:
   train_frac: 0.70
@@ -16,5 +17,3 @@ jsd:
   n_restarts: 200
   n_bins: 50
   random_seed: 42
-
-out_dir: "/scratch3/plant-traits-v2/data/22km/splits/"

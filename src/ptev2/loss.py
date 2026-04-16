@@ -80,7 +80,6 @@ class WeightedMaskedDenseLoss(nn.Module):
                 "source_mask and target shapes must match, got "
                 f"{source_mask.shape} vs {target.shape}"
             )
-
         source_mask_i = source_mask.to(torch.int64)
         valid = (
             torch.isfinite(prediction) & torch.isfinite(target) & (source_mask_i > 0)
@@ -104,7 +103,12 @@ class WeightedMaskedDenseLoss(nn.Module):
             zero = prediction.sum() * 0.0
             return zero, denominator
 
-        numerator = (self._error_map(prediction, target) * weighted_valid).sum()
+        # Important: avoid propagating NaN gradients from invalid target locations.
+        # We sanitize both tensors before error computation and re-apply the valid mask.
+        pred_safe = torch.where(valid, prediction, torch.zeros_like(prediction))
+        target_safe = torch.where(valid, target, torch.zeros_like(target))
+        error_map = self._error_map(pred_safe, target_safe)
+        numerator = (error_map * weighted_valid).sum()
         return numerator, denominator
 
     def forward(

@@ -6,3 +6,8 @@ defaults:
   - prediction: default
   - wandb: default
   - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null

@@ -5,11 +5,12 @@ from pathlib import Path
 import hydra
 import numpy as np
 import torch
+import wandb
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+from sklearn.metrics import mean_squared_error
 from tqdm import tqdm
 
-import wandb
 from ptev2.data.dataloader import get_dataloader
 from ptev2.metrics.aoa import collect_patch_features, compute_aoa_metrics
 from ptev2.metrics.core import pearson_r as pearson_r_metric
@@ -47,7 +48,7 @@ def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
 def _target_layout_from_cfg(
     cfg: DictConfig,
 ) -> tuple[int, list[str], list[int], list[int]]:
-    target_cfg = cfg.training.data.target
+    target_cfg = cfg.training.data.targets
     available_statistics = [str(v) for v in target_cfg.available_statistics]
     selected_statistics = [str(v) for v in target_cfg.selected_statistics]
     source_statistic = str(target_cfg.source_statistic)
@@ -84,20 +85,11 @@ def _target_layout_from_cfg(
     return n_traits, selected_statistics, target_indices, source_indices
 
 
-def _source_mask_nodata_values(cfg: DictConfig) -> list[int]:
-    raw = cfg.training.data.target.source_mask_nodata_values
-    if raw is None:
-        return []
-    if isinstance(raw, (int, str)):
-        return [int(raw)]
-    return [int(v) for v in raw]
-
-
 def _split_target_and_source(
     y_full: torch.Tensor,
     target_indices: list[int],
     source_indices: list[int],
-    nodata_values: list[int],
+    valid_source_values: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if y_full.ndim != 4:
         raise ValueError(
@@ -105,20 +97,22 @@ def _split_target_and_source(
         )
 
     y_target = y_full[:, target_indices]
-    source_mask = (
+    source_mask_raw = (
         torch.nan_to_num(y_full[:, source_indices], nan=0.0).round().to(torch.int64)
     )
-    for nodata_value in nodata_values:
+    source_mask = torch.zeros_like(source_mask_raw)
+    for value in valid_source_values:
         source_mask = torch.where(
-            source_mask == nodata_value,
-            torch.zeros_like(source_mask),
+            source_mask_raw == int(value),
+            source_mask_raw,
             source_mask,
         )
     return y_target, source_mask
 
 
 def evaluate_model(cfg: DictConfig) -> dict:
-    seed_all(cfg.training.seed)
+    train_cfg = cfg.training.train
+    seed_all(int(train_cfg.seed))
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA ist erforderlich, aber nicht verfuegbar.")
     device = torch.device("cuda")
@@ -155,7 +149,13 @@ def evaluate_model(cfg: DictConfig) -> dict:
         f"output_channels={len(target_channel_indices)}"
     )
 
-    mask_nodata_values = _source_mask_nodata_values(cfg)
+    source_encoding_cfg = cfg.training.data.targets.source_encoding
+    source_valid_values = sorted(
+        {
+            int(source_encoding_cfg.gbif),
+            int(source_encoding_cfg.splot),
+        }
+    )
 
     zarr_dir = Path(cfg.training.data.zarr_dir)
     test_zarr_dir_cfg = cfg.evaluation.test_zarr_dir
@@ -168,7 +168,7 @@ def evaluate_model(cfg: DictConfig) -> dict:
         zarr_dir=test_zarr_dir,
         split=test_split,
         predictors=predictors,
-        target=str(cfg.training.data.target.source),
+        target=str(cfg.training.data.targets.source),
         batch_size=batch_size,
         num_workers=num_workers,
     )
@@ -180,7 +180,7 @@ def evaluate_model(cfg: DictConfig) -> dict:
             zarr_dir=zarr_dir,
             split=str(cfg.training.data.train_split),
             predictors=predictors,
-            target=str(cfg.training.data.target.source),
+            target=str(cfg.training.data.targets.source),
             batch_size=batch_size,
             num_workers=num_workers,
         )
@@ -223,9 +223,9 @@ def evaluate_model(cfg: DictConfig) -> dict:
     all_y_pred: list[np.ndarray] = []
     skipped_batches = 0
 
-    splot_code = int(cfg.data.source_mask_encoding.splot)
-    splot_sqerr_sum = 0.0
-    splot_count = 0
+    splot_code = int(cfg.training.data.targets.source_encoding.splot)
+    splot_y_true: list[np.ndarray] = []
+    splot_y_pred: list[np.ndarray] = []
 
     with torch.no_grad():
         for X, y_full in tqdm(test_loader, desc=f"Evaluating [{test_split}]"):
@@ -235,7 +235,7 @@ def evaluate_model(cfg: DictConfig) -> dict:
                 y_full=y_full,
                 target_indices=target_channel_indices,
                 source_indices=source_indices,
-                nodata_values=mask_nodata_values,
+                valid_source_values=source_valid_values,
             )
 
             y_pred = model(X)
@@ -256,9 +256,8 @@ def evaluate_model(cfg: DictConfig) -> dict:
                 torch.isfinite(y_pred) & torch.isfinite(y) & (source_mask == splot_code)
             )
             if bool(valid_splot.any()):
-                diff = y_pred - y
-                splot_sqerr_sum += float(diff[valid_splot].pow(2).sum().item())
-                splot_count += int(valid_splot.sum().item())
+                splot_y_pred.append(y_pred[valid_splot].detach().cpu().numpy())
+                splot_y_true.append(y[valid_splot].detach().cpu().numpy())
 
     if all_y_true:
         y_true_vec = np.concatenate(all_y_true)
@@ -271,9 +270,16 @@ def evaluate_model(cfg: DictConfig) -> dict:
         r2 = float("nan")
         pearson_r = float("nan")
 
-    rmse_splot_overall = (
-        math.sqrt(splot_sqerr_sum / splot_count) if splot_count > 0 else float("nan")
-    )
+    if splot_y_true:
+        y_true_splot = np.concatenate(splot_y_true)
+        y_pred_splot = np.concatenate(splot_y_pred)
+        splot_count = int(y_true_splot.size)
+        rmse_splot_overall = float(
+            math.sqrt(mean_squared_error(y_true_splot, y_pred_splot))
+        )
+    else:
+        splot_count = 0
+        rmse_splot_overall = float("nan")
 
     results = {
         "checkpoint": str(checkpoint_path),
@@ -295,7 +301,11 @@ def evaluate_model(cfg: DictConfig) -> dict:
         if output_path_cfg
         else checkpoint_path.with_suffix(".test_metrics.json")
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not output_path.parent.exists():
+        raise FileNotFoundError(
+            f"Evaluation output directory does not exist: {output_path.parent}. "
+            "Create it explicitly or set evaluation.output_path to an existing directory."
+        )
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(results, handle, indent=2)
 
