@@ -134,6 +134,8 @@ def _init_zarr_store(
     stride: int,
     crs,
     transform,
+    raster_height: int,
+    raster_width: int,
 ) -> tuple[zarr.Group, dict, zarr.Array]:
     """Create and pre-allocate a zarr store for a single split.
 
@@ -165,6 +167,8 @@ def _init_zarr_store(
     store.attrs["transform"] = list(transform)
     store.attrs["patch_size"] = patch_size
     store.attrs["stride"] = stride
+    store.attrs["raster_height"] = raster_height
+    store.attrs["raster_width"] = raster_width
     store.attrs["creation_date"] = datetime.now().isoformat(timespec="seconds")
 
     arrays = {}
@@ -319,6 +323,8 @@ def chip_rasters_to_zarr(
                     stride=stride,
                     crs=crs,
                     transform=transform,
+                    raster_height=height,
+                    raster_width=width,
                 )
             )
 

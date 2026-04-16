@@ -29,8 +29,7 @@ def main(cfg: DictConfig) -> None:
     # chipping settings
     patch_size = cfg.settings.patch_size
     stride = cfg.settings.stride
-    stride_test = cfg.settings.get("stride_test", patch_size)
-    stride_per_split = {"train": stride, "val": stride, "test": stride_test}
+    stride_per_split = {"train": stride, "val": stride, "test": stride}
 
     # get predictors and targets to use
     used_predictors = {
@@ -70,8 +69,7 @@ def main(cfg: DictConfig) -> None:
 
     console.print("[bold]Chipping settings:[/bold]")
     console.print(f"Patch size:        [cyan]{patch_size}[/cyan] px")
-    console.print(f"Stride train/val:  [cyan]{stride}[/cyan] px")
-    console.print(f"Stride test:       [cyan]{stride_test}[/cyan] px")
+    console.print(f"Stride:            [cyan]{stride}[/cyan] px")
 
     console.rule()
 
@@ -95,7 +93,6 @@ def main(cfg: DictConfig) -> None:
     console.rule()
 
     save_all = cfg.settings.get("save_all", False)
-    stride_all = cfg.settings.get("stride_all", None)
 
     chip_rasters_to_zarr(
         predictors=predictor_paths,
@@ -105,7 +102,6 @@ def main(cfg: DictConfig) -> None:
         stride_per_split=stride_per_split,
         h3_file=splits_file,
         save_all=save_all,
-        stride_all=stride_all,
     )
 
     # Export chip bounds to GeoPackage for inspection
