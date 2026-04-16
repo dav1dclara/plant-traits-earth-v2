@@ -31,7 +31,7 @@ data_loaders:
   num_workers: 4
 
 train:
-  seed: 42
+  seed: 0
   epochs: 50
   # run_name: null
 

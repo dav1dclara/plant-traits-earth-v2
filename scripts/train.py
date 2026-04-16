@@ -1,3 +1,4 @@
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -30,10 +31,9 @@ def main(cfg: DictConfig) -> None:
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
-    use_amp = device.type == "cuda"
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
-    console.print(f"Device: [cyan]{device}[/cyan]  AMP: [cyan]{use_amp}[/cyan]")
+    console.print(f"Device: [cyan]{device}[/cyan]")
 
     # Data configuration
     console.print("[bold]\nData[/bold]")
@@ -216,7 +216,9 @@ def main(cfg: DictConfig) -> None:
     best_val_loss = float("inf")
     best_epoch = -1
     epochs_without_improvement = 0
-    best_checkpoint_path = checkpoint_dir / f"{run_name}_best.pth"
+    best_checkpoint_path = checkpoint_dir / f"{run_name}.pth"
+    config_path = checkpoint_dir / f"{run_name}.yaml"
+    OmegaConf.save(cfg, config_path)
 
     for epoch in range(cfg.train.epochs):
         console.rule(f"Epoch {epoch + 1}/{cfg.train.epochs}")
@@ -266,6 +268,7 @@ def main(cfg: DictConfig) -> None:
             train_num_total += batch_num.detach().item()
             train_den_total += batch_den.detach().item()
 
+        current_lr = optimizer.param_groups[0]["lr"]
         scheduler.step()
         train_loss_avg = (
             train_num_total / train_den_total if train_den_total > 0.0 else float("nan")
@@ -317,18 +320,17 @@ def main(cfg: DictConfig) -> None:
         # val_valid_pct = 100.0 * val_valid_pixels / val_total_pixels if val_total_pixels > 0 else float("nan")
         console.print(f"  val_loss={val_loss_avg:.6f}")
 
-        # W&B logging
-        if cfg.wandb.enabled:
-            wandb.log(
-                {
-                    "epoch": epoch + 1,
-                    "train/loss": train_loss_avg,
-                    "val/loss": val_loss_avg,
-                }
+        # Checkpoint: save best model
+        val_loss_valid = math.isfinite(val_loss_avg)
+        if not val_loss_valid:
+            console.print(
+                "[yellow]val_loss is NaN — skipping checkpoint and early-stopping update.[/yellow]"
             )
 
-        # Checkpoint: save best model
-        if val_loss_avg < best_val_loss - early_stopping_min_delta:
+        is_best = (
+            val_loss_valid and val_loss_avg < best_val_loss - early_stopping_min_delta
+        )
+        if is_best:
             best_val_loss = val_loss_avg
             best_epoch = epoch + 1
             epochs_without_improvement = 0
@@ -337,16 +339,27 @@ def main(cfg: DictConfig) -> None:
                     "epoch": best_epoch,
                     "state_dict": model.state_dict(),
                     "val_loss": best_val_loss,
+                    "config": OmegaConf.to_container(cfg, resolve=True),
                 },
                 best_checkpoint_path,
             )
             console.print(
                 f"[green]New best model saved[/green] (val_loss={best_val_loss:.6f})"
             )
-            if cfg.wandb.enabled:
-                wandb.log({"epoch": epoch + 1, "val/loss_best": best_val_loss})
-        else:
+        elif val_loss_valid:
             epochs_without_improvement += 1
+
+        # W&B logging
+        if cfg.wandb.enabled:
+            log_dict = {
+                "epoch": epoch + 1,
+                "train/loss": train_loss_avg,
+                "val/loss": val_loss_avg,
+                "train/lr": current_lr,
+            }
+            if is_best:
+                log_dict["val/loss_best"] = best_val_loss
+            wandb.log(log_dict)
 
         # Early stopping
         if (
