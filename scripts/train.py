@@ -16,7 +16,7 @@ from ptev2.utils import seed_all
 console = Console()
 
 
-@hydra.main(config_path="../config", config_name="training/david", version_base=None)
+@hydra.main(config_path="../config", config_name="training/default", version_base=None)
 def main(cfg: DictConfig) -> None:
     console.rule("[bold cyan]TRAINING[/bold cyan]")
 
