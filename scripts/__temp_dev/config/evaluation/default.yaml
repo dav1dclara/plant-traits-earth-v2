@@ -1,5 +1,0 @@
-compute_aoa: true
-checkpoint_path: null
-output_path: null
-test_zarr_dir: /scratch3/plant-traits-v2/data/22km/chips/patch15_stride10/test.zarr
-test_split: ${training.data.test_split}

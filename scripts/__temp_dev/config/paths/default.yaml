@@ -1,4 +1,0 @@
-# Data roots and output directories
-data_dir: /scratch3/plant-traits-v2/data
-models_dir: /scratch3/plant-traits-v2/models
-predictions_dir: /scratch3/plant-traits-v2/predictions/dev
