@@ -453,6 +453,9 @@ def main(cfg: DictConfig) -> None:
                     "in_channels": total_pred_bands,
                     "out_channels": len(target_indices),
                     "config": OmegaConf.to_container(cfg, resolve=True),
+                    "wandb_run_id": getattr(run, "id", None)
+                    if cfg.wandb.enabled
+                    else None,
                 },
                 best_checkpoint_path,
             )
@@ -503,6 +506,7 @@ def main(cfg: DictConfig) -> None:
         final_status = (
             "ok" if math.isfinite(best_val_loss) and best_epoch > 0 else "failed"
         )
+        run.summary["wandb_run_id"] = getattr(run, "id", None)
         run.summary["best_val_loss"] = (
             float(best_val_loss) if math.isfinite(best_val_loss) else None
         )

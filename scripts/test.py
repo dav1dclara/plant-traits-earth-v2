@@ -233,6 +233,25 @@ def _find_wandb_id_from_local_logs(run_name: str, repo_root: Path) -> str | None
     return None
 
 
+def _resolve_wandb_resume_id(
+    cfg: DictConfig,
+    train_cfg: DictConfig,
+    checkpoint_state: dict,
+    checkpoint_path: Path,
+) -> str | None:
+    checkpoint_wandb_id = checkpoint_state.get("wandb_run_id")
+    if checkpoint_wandb_id:
+        return str(checkpoint_wandb_id)
+
+    train_summary_wandb_id = OmegaConf.select(train_cfg, "wandb_run_id")
+    if train_summary_wandb_id:
+        return str(train_summary_wandb_id)
+
+    run_name = _resolve_run_name(cfg) or checkpoint_path.stem
+    repo_root = Path(__file__).resolve().parents[1]
+    return _find_wandb_id_from_local_logs(run_name, repo_root)
+
+
 @hydra.main(version_base=None, config_path="../config/test", config_name="default")
 def main(cfg: DictConfig) -> None:
     console.rule("[bold cyan]TEST + FINAL PREDICTION[/bold cyan]")
@@ -439,8 +458,7 @@ def main(cfg: DictConfig) -> None:
             return
 
         run_name = _resolve_run_name(cfg) or checkpoint_path.stem
-        repo_root = Path(__file__).resolve().parents[1]
-        resume_id = _find_wandb_id_from_local_logs(run_name, repo_root)
+        resume_id = _resolve_wandb_resume_id(cfg, train_cfg, state, checkpoint_path)
 
         if resume_id:
             console.print(
