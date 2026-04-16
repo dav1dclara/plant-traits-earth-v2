@@ -10,7 +10,6 @@ from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 from rich.progress import track
 
-import wandb
 from ptev2.data.dataloader import get_dataloader
 from ptev2.utils import seed_all
 
@@ -196,18 +195,38 @@ def main(cfg: DictConfig) -> None:
         console.print(f"  Patience (epochs):   [cyan]{early_stopping_patience}[/cyan]")
         console.print(f"  Min delta:           [cyan]{early_stopping_min_delta}[/cyan]")
 
+    requested_run_name = OmegaConf.select(cfg, "train.run_name")
+    if requested_run_name is not None:
+        requested_run_name = str(requested_run_name)
+    requested_run_group = OmegaConf.select(cfg, "train.group")
+    if requested_run_group is not None:
+        requested_run_group = str(requested_run_group)
+
+    wandb_module = None
+
     # W&B
     if cfg.wandb.enabled:
-        run = wandb.init(
+        try:
+            import wandb as wandb_module  # Lazy import for debugger stability.
+        except Exception as exc:
+            raise RuntimeError(
+                "W&B is enabled but import failed. "
+                "Set wandb.enabled=false for debugging or fix the environment. "
+                f"Original error: {exc}"
+            ) from exc
+
+        run = wandb_module.init(
             entity=cfg.wandb.entity,
             project=cfg.wandb.project,
+            name=requested_run_name,
+            group=requested_run_group,
             config=OmegaConf.to_container(cfg, resolve=True),
             reinit=True,
         )
         run_name = run.name
         console.print(f"W&B logging enabled. Run: [cyan]{run_name}[/cyan]")
     else:
-        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = requested_run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
         console.print("[yellow]W&B logging disabled.[/yellow]")
 
     # Checkpoint and early stopping state
@@ -339,6 +358,8 @@ def main(cfg: DictConfig) -> None:
                     "epoch": best_epoch,
                     "state_dict": model.state_dict(),
                     "val_loss": best_val_loss,
+                    "in_channels": total_pred_bands,
+                    "out_channels": len(target_indices),
                     "config": OmegaConf.to_container(cfg, resolve=True),
                 },
                 best_checkpoint_path,
@@ -359,7 +380,8 @@ def main(cfg: DictConfig) -> None:
             }
             if is_best:
                 log_dict["val/loss_best"] = best_val_loss
-            wandb.log(log_dict)
+            if wandb_module is not None:
+                wandb_module.log(log_dict)
 
         # Early stopping
         if (
@@ -374,6 +396,17 @@ def main(cfg: DictConfig) -> None:
     console.rule("[bold cyan]DONE[/bold cyan]")
     console.print(f"Best val_loss={best_val_loss:.6f} at epoch {best_epoch}")
     console.print(f"Checkpoint: [cyan]{best_checkpoint_path}[/cyan]")
+
+    if cfg.wandb.enabled:
+        final_status = (
+            "ok" if math.isfinite(best_val_loss) and best_epoch > 0 else "failed"
+        )
+        run.summary["best_val_loss"] = (
+            float(best_val_loss) if math.isfinite(best_val_loss) else None
+        )
+        run.summary["best_epoch"] = int(best_epoch)
+        run.summary["checkpoint_path"] = str(best_checkpoint_path)
+        run.summary["status"] = final_status
 
     # Close wandb run
     if cfg.wandb.enabled:

@@ -40,7 +40,8 @@ def rmse(y_true: Any, y_pred: Any) -> float:
     yt, yp = _mask_finite_pairs(y_true, y_pred)
     if yt.size == 0:
         return float(np.nan)
-    return float(mean_squared_error(yt, yp, squared=False))
+    # Keep compatibility across sklearn versions that may not support squared=False.
+    return float(np.sqrt(mean_squared_error(yt, yp)))
 
 
 def r2_score(y_true: Any, y_pred: Any) -> float:
