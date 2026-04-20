@@ -63,6 +63,7 @@ def summarize_single_trait_metrics(
     source_mask: Any,
     trait_names: Sequence[str],
     n_bands: int,
+    valid_source_value: int | float = 2,
 ) -> dict[str, Any]:
     y_true_np = _to_numpy(y_true)
     y_pred_np = _to_numpy(y_pred)
@@ -73,7 +74,9 @@ def summarize_single_trait_metrics(
 
     source_mask_expanded = np.repeat(source_mask_np, n_bands, axis=1)
     global_valid = (
-        np.isfinite(y_true_np) & np.isfinite(y_pred_np) & (source_mask_expanded > 0)
+        np.isfinite(y_true_np)
+        & np.isfinite(y_pred_np)
+        & (source_mask_expanded == valid_source_value)
     )
 
     global_y_true = y_true_np[global_valid]
@@ -102,7 +105,9 @@ def summarize_single_trait_metrics(
         source_trait = source_mask_np[:, trait_idx : trait_idx + 1]
 
         valid_trait = (
-            np.isfinite(y_true_trait) & np.isfinite(y_pred_trait) & (source_trait > 0)
+            np.isfinite(y_true_trait)
+            & np.isfinite(y_pred_trait)
+            & (source_trait == valid_source_value)
         )
         if np.any(valid_trait):
             yt_trait = y_true_trait[valid_trait]

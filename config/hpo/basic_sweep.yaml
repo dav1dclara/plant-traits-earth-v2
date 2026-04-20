@@ -1,6 +1,8 @@
 program: scripts/train.py
+entity: plant-traits-v2
+project: Project_PTV2
 method: bayes
-name: ptev2-basic-hpo
+name: respatch-stl-hpo
 command:
   - ${env}
   - ${interpreter}
@@ -21,7 +23,7 @@ parameters:
   train.early_stopping.enabled:
     value: true
   train.early_stopping.patience:
-    value: 15
+    value: 10
   train.early_stopping.min_delta:
     value: 0.0
   train.optimizer.lr:
@@ -35,13 +37,21 @@ parameters:
   train.loss.error_type:
     value: smooth_l1
   train.loss.huber_delta:
-    value: 1.0
+    values: [0.5, 1.0, 2.0]
   train.loss.w_gbif:
     values: [0.5, 1.0, 2.0]
   train.loss.w_splot:
     values: [2.0, 4.0, 6.0, 8.0, 10.0]
+  train.scheduler.step_size:
+    values: [5, 10, 15]
+  train.scheduler.gamma:
+    values: [0.5, 0.7, 0.85, 0.95]
+  train.gradient_clip_norm:
+    values: [0.5, 1.0, 2.0, 5.0]
   models.base_channels:
     values: [32, 48, 64]
+  models.head_depth:
+    values: [1, 2]
   models.dropout_p:
     distribution: uniform
     min: 0.05

@@ -11,32 +11,23 @@ from rich.console import Console
 from rich.progress import track
 
 from ptev2.data.dataloader import get_dataloader
-from ptev2.utils import seed_all
+from ptev2.metrics.evaluation import summarize_single_trait_metrics
+from ptev2.utils import (
+    build_target_layout,
+    predict_batch,
+    resolve_device,
+    resolve_model_cfg,
+    resolve_train_zarr_dir,
+    seed_all,
+)
 
 console = Console()
-
-
-def _resolve_model_cfg(cfg: DictConfig) -> DictConfig:
-    """Support both flat model configs and legacy nested configs with 'active'."""
-    model_cfg = cfg.models
-    if OmegaConf.select(model_cfg, "_target_") is not None:
-        return model_cfg
-
-    active_cfg = OmegaConf.select(model_cfg, "active")
-    if active_cfg is not None and OmegaConf.select(active_cfg, "_target_") is not None:
-        return active_cfg
-
-    raise ValueError(
-        "Model config must define '_target_' either at cfg.models._target_ "
-        "or cfg.models.active._target_."
-    )
 
 
 def _build_loss(cfg: DictConfig, n_outputs: int):
     """Instantiate the configured loss with model-output-aware defaults when needed."""
     loss_cfg = OmegaConf.create(OmegaConf.to_container(cfg.train.loss, resolve=False))
 
-    # Backward-compatible alias: allow users to pass train.loss.target=...
     alias_target = OmegaConf.select(loss_cfg, "target")
     if alias_target is not None:
         OmegaConf.update(loss_cfg, "_target_", alias_target, force_add=True)
@@ -48,7 +39,6 @@ def _build_loss(cfg: DictConfig, n_outputs: int):
     loss_kwargs = {}
     if loss_target.endswith("UncertaintyWeightedMTLLoss"):
         loss_kwargs["n_traits"] = int(n_outputs)
-        # These parameters are valid for WeightedMaskedDenseLoss but not uncertainty loss.
         for incompatible_key in ("error_type", "huber_delta"):
             if incompatible_key in loss_cfg:
                 del loss_cfg[incompatible_key]
@@ -79,39 +69,24 @@ def _loss_components(
 def main(cfg: DictConfig) -> None:
     console.rule("[bold cyan]TRAINING[/bold cyan]")
 
-    # Set random seed
     seed_all(cfg.train.seed)
 
-    # Set device
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = resolve_device()
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
     console.print(f"Device: [cyan]{device}[/cyan]")
 
-    # Data configuration
     console.print("[bold]\nData[/bold]")
-    root_dir = Path(cfg.data.root_dir)
-    resolution_km = cfg.data.resolution_km
-    patch_size = cfg.data.patch_size
-    stride = cfg.data.stride
-    zarr_dir = (
-        root_dir / f"{resolution_km}km" / "chips" / f"patch{patch_size}_stride{stride}"
-    )
+    zarr_dir = resolve_train_zarr_dir(cfg)
     assert zarr_dir.exists(), f"Zarr directory does not exist: {zarr_dir}"
 
-    console.print(f"Resolution (km): [cyan]{resolution_km}[/cyan]")
-    console.print(f"Patch size: [cyan]{patch_size}[/cyan]")
-    console.print(f"Stride: [cyan]{stride}[/cyan]")
+    console.print(f"Resolution (km): [cyan]{cfg.data.resolution_km}[/cyan]")
+    console.print(f"Patch size: [cyan]{cfg.data.patch_size}[/cyan]")
+    console.print(f"Stride: [cyan]{cfg.data.stride}[/cyan]")
     console.print(f"Zarr directory: [cyan]{zarr_dir}[/cyan]")
 
     train_store = zarr.open_group(str(zarr_dir / "train.zarr"), mode="r")
 
-    # Predictors
     console.print("[bold]\nPredictors:[/bold]")
     predictors = [
         name
@@ -128,44 +103,11 @@ def main(cfg: DictConfig) -> None:
         console.print(f"  - [cyan]{predictor}[/cyan] ({n_bands} bands)")
     console.print(f"  Total: [cyan]{total_pred_bands} bands[/cyan]")
 
-    # Targets
     console.print("\n[bold]Targets:[/bold]")
-
-    # What's available in the zarr store
-    zarr_dataset_names = list(train_store["targets"].keys())
-    zarr_band_names = train_store["targets"].attrs["band_names"]
-    band_to_idx = {name: idx for idx, name in enumerate(zarr_band_names)}
-
-    # What's requested in the config
-    target_cfg = cfg.data.targets
-    target_dataset = str(target_cfg.dataset)
-    cfg_bands = [str(v) for v in target_cfg.bands]
-
-    # Validate config against zarr store
-    if target_dataset not in zarr_dataset_names:
-        raise ValueError(
-            f"Dataset '{target_dataset}' not found in zarr. Available: {', '.join(zarr_dataset_names)}"
-        )
-    zarr_all_traits = [
-        f.replace("X", "").replace(".tif", "")
-        for f in train_store[f"targets/{target_dataset}"].attrs["files"]
-    ]
-    traits = (
-        [str(v) for v in target_cfg.traits] if target_cfg.traits else zarr_all_traits
+    target_dataset, traits, bands, target_indices, source_indices = build_target_layout(
+        cfg, train_store
     )
-    for trait in traits:
-        if trait not in zarr_all_traits:
-            raise ValueError(
-                f"Trait '{trait}' not found in dataset '{target_dataset}' in zarr."
-            )
-    for band in cfg_bands:
-        if band not in band_to_idx:
-            raise ValueError(
-                f"Band '{band}' not found in zarr. Available: {', '.join(zarr_band_names)}"
-            )
-    bands = cfg_bands
 
-    # Print what we're using
     console.print(f"Dataset: [cyan]{target_dataset}[/cyan]")
     console.print(f"Traits ([cyan]{len(traits)}[/cyan]):")
     for trait in traits:
@@ -174,17 +116,6 @@ def main(cfg: DictConfig) -> None:
     for band in bands:
         console.print(f"  - {band}")
 
-    n_bands = len(zarr_band_names)
-    target_indices = [
-        trait_pos * n_bands + band_to_idx[band]
-        for trait_pos in range(len(traits))
-        for band in bands
-    ]
-    source_indices = [
-        trait_pos * n_bands + band_to_idx["source"] for trait_pos in range(len(traits))
-    ]
-
-    # Dataloader configuration
     console.print("\n[bold]Data loaders:[/bold]")
     batch_size = cfg.data_loaders.batch_size
     num_workers = cfg.data_loaders.num_workers
@@ -222,9 +153,8 @@ def main(cfg: DictConfig) -> None:
     console.print(f"Target shape (C,H,W): [cyan]{tuple(y_t.shape[1:])}[/cyan]")
     console.print(f"Source mask shape (C,H,W): [cyan]{tuple(src_t.shape[1:])}[/cyan]")
 
-    model_cfg = _resolve_model_cfg(cfg)
+    model_cfg = resolve_model_cfg(cfg)
 
-    # Model
     console.print("\n[bold]Model and training configuration[/bold]")
     model = instantiate(
         model_cfg, in_channels=total_pred_bands, out_channels=len(target_indices)
@@ -235,7 +165,6 @@ def main(cfg: DictConfig) -> None:
     console.print(f"  Out channels: [cyan]{len(target_indices)}[/cyan]")
     console.print(f"  Parameters:   [cyan]{n_params:,}[/cyan]")
 
-    # Optimizer, loss, scheduler
     loss_fn = _build_loss(cfg, n_outputs=len(target_indices))
     if isinstance(loss_fn, torch.nn.Module):
         loss_fn = loss_fn.to(device)
@@ -246,16 +175,13 @@ def main(cfg: DictConfig) -> None:
         loss_params = [p for p in loss_fn.parameters() if p.requires_grad]
     optimizer = instantiate(cfg.train.optimizer, params=model_params + loss_params)
     scheduler = instantiate(cfg.train.scheduler, optimizer=optimizer)
-    # scheduler_metric_name = str(cfg.train.scheduler_step.metric)  # TODO: what does this do?
     grad_clip_norm = float(cfg.train.gradient_clip_norm)
     console.print(f"Optimizer:             [cyan]{cfg.train.optimizer._target_}[/cyan]")
     loss_name = f"{loss_fn.__class__.__module__}.{loss_fn.__class__.__name__}"
     console.print(f"Loss:                  [cyan]{loss_name}[/cyan]")
     console.print(f"Scheduler:             [cyan]{cfg.train.scheduler._target_}[/cyan]")
-    # console.print(f"Scheduler step metric: [cyan]{scheduler_metric_name}[/cyan]")
     console.print(f"Gradient clip norm:    [cyan]{grad_clip_norm}[/cyan]")
 
-    # Early stopping configuration
     early_stopping_enabled = bool(cfg.train.early_stopping.enabled)
     early_stopping_patience = int(cfg.train.early_stopping.patience)
     early_stopping_min_delta = float(cfg.train.early_stopping.min_delta)
@@ -273,10 +199,9 @@ def main(cfg: DictConfig) -> None:
 
     wandb_module = None
 
-    # W&B
     if cfg.wandb.enabled:
         try:
-            import wandb as wandb_module  # Lazy import for debugger stability.
+            import wandb as wandb_module
         except Exception as exc:
             raise RuntimeError(
                 "W&B is enabled but import failed. "
@@ -298,7 +223,6 @@ def main(cfg: DictConfig) -> None:
         run_name = requested_run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
         console.print("[yellow]W&B logging disabled.[/yellow]")
 
-    # Checkpoint and early stopping state
     checkpoint_dir = Path(cfg.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_val_loss = float("inf")
@@ -311,34 +235,23 @@ def main(cfg: DictConfig) -> None:
     for epoch in range(cfg.train.epochs):
         console.rule(f"Epoch {epoch + 1}/{cfg.train.epochs}")
 
-        # Training loop
         model.train()
         train_num_total = 0.0
         train_den_total = 0.0
-        # train_total_pixels = 0
-        # train_valid_pixels = 0
 
         for X, y, src in track(train_loader, description="Training"):
             X = X.to(device, dtype=torch.float32)
             y = y.to(device, dtype=torch.float32)
             src = src.to(device, dtype=torch.float32)
 
-            # Mask y where predictors are invalid or source is unlabeled
-            valid = torch.isfinite(X).all(dim=1, keepdim=True)
-            X = torch.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-            X = torch.clamp(X, min=-1e4, max=1e4)
+            y_pred, valid = predict_batch(model, X)
             y = torch.where(valid.expand_as(y), y, torch.nan)
             y = torch.where(src > 0, y, torch.nan)
 
-            # train_total_pixels += y.numel()
-            # train_valid_pixels += int(torch.isfinite(y).sum().item())
-
-            # Skip batch if no valid observations
             if not torch.isfinite(y).any():
                 continue
 
             optimizer.zero_grad(set_to_none=True)
-            y_pred = model(X)
             if not torch.isfinite(y_pred).all():
                 continue
             batch_num, batch_den = _loss_components(loss_fn, y_pred, y, src)
@@ -361,20 +274,14 @@ def main(cfg: DictConfig) -> None:
         train_loss_avg = (
             train_num_total / train_den_total if train_den_total > 0.0 else float("nan")
         )
-        # train_valid_pct = 100.0 * train_valid_pixels / train_total_pixels if train_total_pixels > 0 else float("nan")
         console.print(f"  train_loss={train_loss_avg:.6f}")
 
-        # Validation loop
         model.eval()
         val_num_total = 0.0
         val_den_total = 0.0
-        val_gate_entropy_sum = 0.0
-        val_gate_maxprob_sum = 0.0
-        val_gate_entropy_norm_sum = 0.0
-        val_gate_usage_sum = None
-        val_gate_count = 0
-        # val_total_pixels = 0
-        # val_valid_pixels = 0
+        val_y_true_parts = []
+        val_y_pred_parts = []
+        val_src_parts = []
 
         with torch.no_grad():
             for X, y, src in track(val_loader, description="Validation"):
@@ -382,38 +289,19 @@ def main(cfg: DictConfig) -> None:
                 y = y.to(device, dtype=torch.float32)
                 src = src.to(device, dtype=torch.float32)
 
-                valid = torch.isfinite(X).all(dim=1, keepdim=True)
-                X = torch.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-                X = torch.clamp(X, min=-1e4, max=1e4)
+                y_pred, valid = predict_batch(model, X)
                 y = torch.where(valid.expand_as(y), y, torch.nan)
                 y = torch.where(src > 0, y, torch.nan)
-
-                # val_total_pixels += y.numel()
-                # val_valid_pixels += int(torch.isfinite(y).sum().item())
 
                 if not torch.isfinite(y).any():
                     continue
 
-                y_pred = model(X)
                 if not torch.isfinite(y_pred).all():
                     continue
 
-                gate_weights = getattr(model, "last_gate_weights", None)
-                if gate_weights is not None:
-                    gw = gate_weights.detach()
-                    n_experts = gw.shape[-1]
-                    eps = 1e-12
-                    entropy = -(gw * gw.clamp_min(eps).log()).sum(dim=-1)
-                    max_prob = gw.max(dim=-1).values
-                    entropy_norm = entropy / max(math.log(float(n_experts)), eps)
-                    gate_usage = gw.mean(dim=(0, 1))
-                    if val_gate_usage_sum is None:
-                        val_gate_usage_sum = torch.zeros_like(gate_usage)
-                    val_gate_entropy_sum += float(entropy.mean().item())
-                    val_gate_maxprob_sum += float(max_prob.mean().item())
-                    val_gate_entropy_norm_sum += float(entropy_norm.mean().item())
-                    val_gate_usage_sum += gate_usage
-                    val_gate_count += 1
+                val_y_true_parts.append(y.detach().cpu())
+                val_y_pred_parts.append(y_pred.detach().cpu())
+                val_src_parts.append(src.detach().cpu())
 
                 batch_num, batch_den = _loss_components(loss_fn, y_pred, y, src)
                 if (
@@ -428,10 +316,25 @@ def main(cfg: DictConfig) -> None:
         val_loss_avg = (
             val_num_total / val_den_total if val_den_total > 0.0 else float("nan")
         )
-        # val_valid_pct = 100.0 * val_valid_pixels / val_total_pixels if val_total_pixels > 0 else float("nan")
         console.print(f"  val_loss={val_loss_avg:.6f}")
 
-        # Checkpoint: save best model
+        val_metric_summary = None
+        if val_y_true_parts:
+            val_metric_summary = summarize_single_trait_metrics(
+                y_true=torch.cat(val_y_true_parts, dim=0),
+                y_pred=torch.cat(val_y_pred_parts, dim=0),
+                source_mask=torch.cat(val_src_parts, dim=0),
+                trait_names=traits,
+                n_bands=len(bands),
+            )
+            console.print(
+                "  val_rmse={rmse:.6f}  val_r2={r2:.6f}  val_pearson_r={pearson_r:.6f}".format(
+                    rmse=val_metric_summary["rmse"],
+                    r2=val_metric_summary["r2"],
+                    pearson_r=val_metric_summary["pearson_r"],
+                )
+            )
+
         val_loss_valid = math.isfinite(val_loss_avg)
         if not val_loss_valid:
             console.print(
@@ -465,7 +368,6 @@ def main(cfg: DictConfig) -> None:
         elif val_loss_valid:
             epochs_without_improvement += 1
 
-        # W&B logging
         if cfg.wandb.enabled:
             log_dict = {
                 "epoch": epoch + 1,
@@ -473,22 +375,15 @@ def main(cfg: DictConfig) -> None:
                 "val/loss": val_loss_avg,
                 "train/lr": current_lr,
             }
+            if val_metric_summary is not None:
+                log_dict["val/rmse"] = val_metric_summary["rmse"]
+                log_dict["val/r2"] = val_metric_summary["r2"]
+                log_dict["val/pearson_r"] = val_metric_summary["pearson_r"]
             if is_best:
                 log_dict["val/loss_best"] = best_val_loss
-            if val_gate_count > 0:
-                gate_entropy = val_gate_entropy_sum / val_gate_count
-                gate_entropy_norm = val_gate_entropy_norm_sum / val_gate_count
-                log_dict["val/gate_entropy"] = gate_entropy
-                log_dict["val/gate_entropy_norm"] = gate_entropy_norm
-                log_dict["val/gate_max_prob"] = val_gate_maxprob_sum / val_gate_count
-                log_dict["val/gate_effective_experts"] = math.exp(gate_entropy)
-                gate_usage_mean = val_gate_usage_sum / val_gate_count
-                for expert_idx, usage in enumerate(gate_usage_mean.tolist()):
-                    log_dict[f"val/gate_usage/e{expert_idx}"] = float(usage)
             if wandb_module is not None:
                 wandb_module.log(log_dict)
 
-        # Early stopping
         if (
             early_stopping_enabled
             and epochs_without_improvement >= early_stopping_patience
@@ -514,7 +409,6 @@ def main(cfg: DictConfig) -> None:
         run.summary["checkpoint_path"] = str(best_checkpoint_path)
         run.summary["status"] = final_status
 
-    # Close wandb run
     if cfg.wandb.enabled:
         run.finish()
 
