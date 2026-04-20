@@ -4,8 +4,9 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from ptev2.models.traitPatchCNN import ResidualBlock
+from ptev2.models.traitPatchCNN import ResidualBlock, _make_norm
 
 
 class SharedEncoder(nn.Module):
@@ -128,10 +129,14 @@ class DenseMMoELayer(nn.Module):
         norm: Literal["bn", "gn", "none"] = "gn",
         gn_groups: int = 8,
         dropout_p: float = 0.0,
+        gate_temperature: float = 1.0,
+        gate_top_k: int | None = None,
     ) -> None:
         super().__init__()
         self.n_experts = n_experts
         self.n_tasks = n_tasks
+        self.gate_temperature = gate_temperature
+        self.gate_top_k = gate_top_k
 
         self.experts = nn.ModuleList(
             [
@@ -153,11 +158,22 @@ class DenseMMoELayer(nn.Module):
                     nn.Linear(in_features, in_features),
                     nn.ReLU(),
                     nn.Linear(in_features, n_experts),
-                    nn.Softmax(dim=-1),
                 )
                 for _ in range(n_tasks)
             ]
         )
+
+    def _apply_gate_constraints(self, gate_logits: torch.Tensor) -> torch.Tensor:
+        scaled_logits = gate_logits / max(self.gate_temperature, 1e-6)
+
+        if self.gate_top_k is None or self.gate_top_k >= self.n_experts:
+            return F.softmax(scaled_logits, dim=-1)
+
+        top_k = max(1, self.gate_top_k)
+        top_values, top_indices = torch.topk(scaled_logits, k=top_k, dim=-1)
+        sparse_logits = torch.full_like(scaled_logits, float("-inf"))
+        sparse_logits.scatter_(-1, top_indices, top_values)
+        return F.softmax(sparse_logits, dim=-1)
 
     def forward(
         self,
@@ -166,13 +182,15 @@ class DenseMMoELayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         expert_outputs = [expert(spatial_features) for expert in self.experts]
         expert_stack = torch.stack(expert_outputs, dim=1)
-        gate_weights = torch.stack([gate(route_features) for gate in self.gates], dim=1)
+
+        gate_logits = torch.stack([gate(route_features) for gate in self.gates], dim=1)
+        gate_weights = self._apply_gate_constraints(gate_logits)
         task_maps = torch.einsum("bte,bechw->btchw", gate_weights, expert_stack)
         return task_maps, gate_weights
 
 
 class MMoEModel(nn.Module):
-    """Dense MMoE model with shared encoder, experts, and task-specific heads."""
+    """Routed dense MMoE model with shared projection and gated expert mixing."""
 
     def __init__(
         self,
@@ -186,6 +204,8 @@ class MMoEModel(nn.Module):
         dropout_p: float = 0.0,
         n_experts: int = 4,
         expert_hidden: int = 64,
+        gate_temperature: float = 1.0,
+        gate_top_k: int | None = None,
     ) -> None:
         super().__init__()
         if n_traits is not None:
@@ -204,16 +224,37 @@ class MMoEModel(nn.Module):
             norm=norm,
             gn_groups=gn_groups,
             dropout_p=dropout_p,
+            gate_temperature=gate_temperature,
+            gate_top_k=gate_top_k,
         )
+
+        self.shared_projection = nn.Sequential(
+            nn.Conv2d(c3, expert_hidden, kernel_size=1, bias=False),
+            _make_norm(norm, expert_hidden, gn_groups),
+            nn.PReLU(num_parameters=expert_hidden),
+        )
+
         self.heads = nn.ModuleList(
             [TaskHead(expert_hidden, 1) for _ in range(out_channels)]
         )
+        self.out_channels = out_channels
         self.last_gate_weights: torch.Tensor | None = None
+        self.gate_temperature = gate_temperature
+        self.gate_top_k = gate_top_k
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.encoder(x)
         route_features = self.route_pool(z).flatten(1)
         task_maps, gate_weights = self.mmoe(z, route_features)
+        shared_map = self.shared_projection(z)
         self.last_gate_weights = gate_weights.detach()
-        outputs = [head(task_maps[:, idx]) for idx, head in enumerate(self.heads)]
+
+        outputs = []
+        for idx, head in enumerate(self.heads):
+            task_features = task_maps[:, idx] + shared_map
+            outputs.append(head(task_features))
         return torch.cat(outputs, dim=1)
+
+
+class GatedMMoEModel(MMoEModel):
+    """Alias for explicit config naming of the routed MMoE architecture."""
