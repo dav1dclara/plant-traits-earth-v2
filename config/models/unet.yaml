@@ -1,0 +1,6 @@
+_target_: ptev2.models.lightweight_unet.LightweightUNet
+encoder_name: resnet18
+encoder_weights: null
+decoder_channels: [128, 64, 32, 16, 8]
+decoder_use_norm: batchnorm
+decoder_attention_type: null
