@@ -1,0 +1,94 @@
+# Training config for MMoE with original hyperparameters.
+#
+# Usage:
+#   python scripts/train.py --config-name training/mtl
+#
+# This overrides the default training config to match the original MTL pipeline
+# hyperparameters that produced better results.
+#
+# @package _global_
+defaults:
+  - /models: mmoe_v2
+  - _self_
+
+data:
+  root_dir: /scratch3/plant-traits-v2/data/
+  resolution_km: 22
+  patch_size: 15
+  stride: 10
+
+  predictors:
+    canopy_height:
+      use: true
+    modis:
+      use: true
+    soil_grids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
+
+  targets:
+    dataset: comb
+    traits: []
+    bands: [mean]
+
+data_loaders:
+  batch_size: 32
+  num_workers: 4
+
+train:
+  seed: 42
+  run_name: null
+  group: null
+  epochs: 100
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 1e-4
+    weight_decay: 5e-5
+
+  # Using WeightedMaskedDenseLoss with MSE since UncertaintyWeightedMTLLoss
+  # log_sigma_sq params are not included in the optimizer (see ANALYSIS.md).
+  # To test uncertainty loss, use the override below and modify train.py to
+  # add loss_fn.parameters() to the optimizer.
+  loss:
+    _target_: ptev2.loss.WeightedMaskedDenseLoss
+    error_type: mse
+    w_gbif: 1.0
+    w_splot: 16.0
+
+  # To use UncertaintyWeightedMTLLoss instead (requires train.py fix):
+  # loss:
+  #   _target_: ptev2.loss.UncertaintyWeightedMTLLoss
+  #   n_traits: 37
+  #   w_gbif: 1.0
+  #   w_splot: 16.0
+  #   init_log_sigma_sq: 0.0
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+    T_max: 100
+    eta_min: 1e-6
+
+  scheduler_step:
+    mode: epoch
+    metric: val_rmse_splot_overall
+
+  gradient_clip_norm: 5.0
+
+  early_stopping:
+    enabled: true
+    patience: 15
+    min_delta: 0.0
+
+  logging:
+    log_val_mae_splot: true
+
+checkpoint_dir: /scratch3/plant-traits-v2/checkpoints/
+
+wandb:
+  enabled: true
+  entity: plant-traits-v2
+  project: Project_PTV2
