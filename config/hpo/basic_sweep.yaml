@@ -9,21 +9,21 @@ command:
   - ${program}
   - ${args_no_hyphens}
 metric:
-  name: val/loss
+  name: val/rmse
   goal: minimize
 early_terminate:
   type: hyperband
-  min_iter: 8
+  min_iter: 5
   eta: 3
 parameters:
   train.seed:
     value: 0
   train.epochs:
-    value: 50
+    value: 35
   train.early_stopping.enabled:
     value: true
   train.early_stopping.patience:
-    value: 10
+    value: 6
   train.early_stopping.min_delta:
     value: 0.0
   train.optimizer.lr:
