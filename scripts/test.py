@@ -16,16 +16,16 @@ from torch.utils.data import DataLoader
 
 from ptev2.data.dataloader import PlantTraitDataset, get_dataloader
 from ptev2.metrics.evaluation import summarize_single_trait_metrics
-from ptev2.utils import seed_all
+from ptev2.utils import (
+    build_target_layout,
+    predict_batch,
+    resolve_device,
+    resolve_model_cfg,
+    resolve_train_zarr_dir,
+    seed_all,
+)
 
 console = Console()
-
-
-def _resolve_run_name(cfg: DictConfig) -> str | None:
-    run_name = OmegaConf.select(cfg, "run_name")
-    if run_name:
-        return str(run_name)
-    return None
 
 
 def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
@@ -33,27 +33,11 @@ def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
     if checkpoint_override:
         return Path(str(checkpoint_override))
 
-    run_name = _resolve_run_name(cfg)
+    run_name = OmegaConf.select(cfg, "run_name")
     if run_name:
-        checkpoint_dir = Path(str(cfg.checkpoint_dir))
-        return checkpoint_dir / f"{run_name}.pth"
+        return Path(str(cfg.checkpoint_dir)) / f"{str(run_name)}.pth"
 
     raise ValueError("Set checkpoint_path or run_name.")
-
-
-def _resolve_model_cfg(train_cfg: DictConfig) -> DictConfig:
-    model_cfg = train_cfg.models
-    if OmegaConf.select(model_cfg, "_target_") is not None:
-        return model_cfg
-
-    active_cfg = OmegaConf.select(model_cfg, "active")
-    if active_cfg is not None and OmegaConf.select(active_cfg, "_target_") is not None:
-        return active_cfg
-
-    raise ValueError(
-        "Model config must define '_target_' either at train_cfg.models._target_ "
-        "or train_cfg.models.active._target_."
-    )
 
 
 def _load_checkpoint_and_train_cfg(
@@ -77,68 +61,6 @@ def _load_checkpoint_and_train_cfg(
             f"{cfg_path}"
         )
     return state, OmegaConf.load(cfg_path)
-
-
-def _resolve_train_zarr_dir(train_cfg: DictConfig) -> Path:
-    return (
-        Path(str(train_cfg.data.root_dir))
-        / f"{train_cfg.data.resolution_km}km"
-        / "chips"
-        / f"patch{train_cfg.data.patch_size}_stride{train_cfg.data.stride}"
-    )
-
-
-def _build_target_layout(
-    train_cfg: DictConfig,
-    train_store: zarr.Group,
-) -> tuple[str, list[str], list[str], list[int], list[int]]:
-    target_cfg = train_cfg.data.targets
-    target_dataset = str(target_cfg.dataset)
-
-    zarr_dataset_names = list(train_store["targets"].keys())
-    if target_dataset not in zarr_dataset_names:
-        raise ValueError(
-            f"Dataset '{target_dataset}' not found in zarr. Available: {', '.join(zarr_dataset_names)}"
-        )
-
-    zarr_band_names = [str(v) for v in train_store["targets"].attrs["band_names"]]
-    band_to_idx = {name: idx for idx, name in enumerate(zarr_band_names)}
-
-    zarr_all_traits = [
-        str(f).replace("X", "").replace(".tif", "")
-        for f in train_store[f"targets/{target_dataset}"].attrs["files"]
-    ]
-    traits = (
-        [str(v) for v in target_cfg.traits] if target_cfg.traits else zarr_all_traits
-    )
-    if not traits:
-        raise ValueError("data.targets.traits must not be empty after resolution.")
-
-    cfg_bands = [str(v) for v in target_cfg.bands]
-    if not cfg_bands:
-        raise ValueError("data.targets.bands must not be empty.")
-
-    n_bands = len(zarr_band_names)
-    target_indices = [
-        trait_pos * n_bands + band_to_idx[band]
-        for trait_pos in range(len(traits))
-        for band in cfg_bands
-    ]
-    source_indices = [
-        trait_pos * n_bands + band_to_idx["source"] for trait_pos in range(len(traits))
-    ]
-
-    return target_dataset, traits, cfg_bands, target_indices, source_indices
-
-
-def _predict_batch(
-    model: torch.nn.Module, X: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    valid_x = torch.isfinite(X).all(dim=1, keepdim=True)
-    X = torch.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-    X = torch.clamp(X, min=-1e4, max=1e4)
-    y_pred = model(X)
-    return y_pred, valid_x
 
 
 def _write_all_prediction_tif(
@@ -167,7 +89,7 @@ def _write_all_prediction_tif(
     _xw = np.minimum(np.arange(1, w_out + 1), np.arange(w_out, 0, -1)).astype(
         np.float32
     )
-    weight_map = np.outer(_yw, _xw)
+    weight_map = np.outer(_yw, _xw) ** 2
 
     canvas = np.zeros((out_ch, canvas_rows, canvas_cols), dtype=np.float32)
     weight_sum = np.zeros((canvas_rows, canvas_cols), dtype=np.float32)
@@ -215,24 +137,6 @@ def _write_all_prediction_tif(
             dst.set_band_description(b_idx, name)
 
 
-def _find_wandb_id_from_local_logs(run_name: str, repo_root: Path) -> str | None:
-    wandb_root = repo_root / "wandb"
-    if not wandb_root.exists():
-        return None
-
-    for run_dir in sorted(wandb_root.glob("run-*/"), reverse=True):
-        output_log = run_dir / "files" / "output.log"
-        if not output_log.exists():
-            continue
-        try:
-            content = output_log.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        if f"Run: {run_name}" in content or f"Syncing run {run_name}" in content:
-            return run_dir.name.split("-")[-1]
-    return None
-
-
 def _resolve_wandb_resume_id(
     cfg: DictConfig,
     train_cfg: DictConfig,
@@ -247,21 +151,30 @@ def _resolve_wandb_resume_id(
     if train_summary_wandb_id:
         return str(train_summary_wandb_id)
 
-    run_name = _resolve_run_name(cfg) or checkpoint_path.stem
-    repo_root = Path(__file__).resolve().parents[1]
-    return _find_wandb_id_from_local_logs(run_name, repo_root)
+    run_name = OmegaConf.select(cfg, "run_name") or checkpoint_path.stem
+    wandb_root = Path(__file__).resolve().parents[1] / "wandb"
+    if not wandb_root.exists():
+        return None
+
+    for run_dir in sorted(wandb_root.glob("run-*/"), reverse=True):
+        output_log = run_dir / "files" / "output.log"
+        if not output_log.exists():
+            continue
+        try:
+            content = output_log.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        if f"Run: {run_name}" in content or f"Syncing run {run_name}" in content:
+            return run_dir.name.split("-")[-1]
+
+    return None
 
 
 @hydra.main(version_base=None, config_path="../config/test", config_name="default")
 def main(cfg: DictConfig) -> None:
     console.rule("[bold cyan]TEST + FINAL PREDICTION[/bold cyan]")
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = resolve_device()
     console.print(f"Device: [cyan]{device}[/cyan]")
 
     checkpoint_path = _resolve_checkpoint_path(cfg)
@@ -275,11 +188,11 @@ def main(cfg: DictConfig) -> None:
     if not predictors:
         raise ValueError("No predictors enabled in checkpoint training config.")
 
-    zarr_dir = _resolve_train_zarr_dir(train_cfg)
+    zarr_dir = resolve_train_zarr_dir(train_cfg)
     train_store = zarr.open_group(str(zarr_dir / "train.zarr"), mode="r")
 
     target_dataset, traits, selected_bands, target_indices, source_indices = (
-        _build_target_layout(train_cfg, train_store)
+        build_target_layout(train_cfg, train_store)
     )
 
     test_split = str(OmegaConf.select(cfg, "test_split") or "test")
@@ -294,7 +207,7 @@ def main(cfg: DictConfig) -> None:
         num_workers=int(train_cfg.data_loaders.num_workers),
     )
 
-    model_cfg = _resolve_model_cfg(train_cfg)
+    model_cfg = resolve_model_cfg(train_cfg)
     checkpoint_state = state.get("state_dict", state)
     if not isinstance(checkpoint_state, dict):
         raise ValueError(f"Checkpoint state for '{checkpoint_path}' is invalid.")
@@ -323,11 +236,12 @@ def main(cfg: DictConfig) -> None:
             y = y.to(device=device, dtype=torch.float32)
             src = src.to(device=device, dtype=torch.float32)
 
-            y_pred, valid_x = _predict_batch(model, X)
+            y_pred, valid_x = predict_batch(model, X)
             y = torch.where(valid_x.expand_as(y), y, torch.nan)
-            y = torch.where(src > 0, y, torch.nan)
+            splot_mask = src == 2
+            y = torch.where(splot_mask, y, torch.nan)
 
-            valid = torch.isfinite(y_pred) & torch.isfinite(y) & (src > 0)
+            valid = torch.isfinite(y_pred) & torch.isfinite(y) & splot_mask
             if not bool(valid.any()):
                 skipped_batches += 1
                 continue
@@ -407,7 +321,7 @@ def main(cfg: DictConfig) -> None:
             all_loader, description=f"All-map [{checkpoint_path.stem}]"
         ):
             X = X.to(device=device, dtype=torch.float32)
-            y_pred_map, valid_x = _predict_batch(model, X)
+            y_pred_map, valid_x = predict_batch(model, X)
             y_pred_map = torch.where(
                 valid_x.expand_as(y_pred_map),
                 y_pred_map,
@@ -457,7 +371,7 @@ def main(cfg: DictConfig) -> None:
             console.print("[yellow]W&B skipped: missing entity/project.[/yellow]")
             return
 
-        run_name = _resolve_run_name(cfg) or checkpoint_path.stem
+        run_name = OmegaConf.select(cfg, "run_name") or checkpoint_path.stem
         resume_id = _resolve_wandb_resume_id(cfg, train_cfg, state, checkpoint_path)
 
         if resume_id:

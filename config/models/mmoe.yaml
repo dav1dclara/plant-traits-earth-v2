@@ -6,3 +6,5 @@ stride_blocks: [1, 1, 1, 1]
 dropout_p: 0.2
 n_experts: 6
 expert_hidden: 192
+gate_temperature: 0.5
+gate_top_k: 2

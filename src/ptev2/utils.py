@@ -3,7 +3,16 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import zarr
 from omegaconf import DictConfig, OmegaConf
+
+
+def resolve_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def seed_all(seed: int = 42):
@@ -13,40 +22,76 @@ def seed_all(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
-def run_name_from_cfg(cfg: DictConfig) -> str:
-    train_cfg = cfg.training.train
-    explicit = train_cfg.run_name
-    if explicit:
-        return str(explicit)
-    seed = train_cfg.seed
-    loss_name = str(train_cfg.loss._target_).split(".")[-1]
-    patch_h = patch_w = cfg.training.data_loaders.patch_size
+def resolve_model_cfg(cfg: DictConfig) -> DictConfig:
+    model_cfg = cfg.models
+    if OmegaConf.select(model_cfg, "_target_") is not None:
+        return model_cfg
+
+    active_cfg = OmegaConf.select(model_cfg, "active")
+    if active_cfg is not None and OmegaConf.select(active_cfg, "_target_") is not None:
+        return active_cfg
+
+    raise ValueError(
+        "Model config must define '_target_' either at cfg.models._target_ or cfg.models.active._target_."
+    )
+
+
+def resolve_train_zarr_dir(cfg: DictConfig) -> Path:
     return (
-        f"{cfg.models.name}_"
-        f"patch({patch_h}x{patch_w})_"
-        f"bs{cfg.training.data_loaders.batch_size}_"
-        f"{loss_name}_"
-        f"seed{seed}"
+        Path(str(cfg.data.root_dir))
+        / f"{cfg.data.resolution_km}km"
+        / "chips"
+        / f"patch{cfg.data.patch_size}_stride{cfg.data.stride}"
     )
 
 
-def checkpoint_paths_from_cfg(
-    cfg: DictConfig,
-    run_name: str | None = None,
-) -> tuple[Path, Path]:
-    if run_name is None:
-        run_name = run_name_from_cfg(cfg)
+def build_target_layout(
+    train_cfg: DictConfig,
+    train_store: zarr.Group,
+) -> tuple[str, list[str], list[str], list[int], list[int]]:
+    target_cfg = train_cfg.data.targets
+    target_dataset = str(target_cfg.dataset)
 
-    checkpoint_dir_cfg = OmegaConf.select(cfg, "training.checkpoint.dir")
-    checkpoint_dir = (
-        Path(str(checkpoint_dir_cfg))
-        if checkpoint_dir_cfg
-        else Path.cwd() / "checkpoints"
+    zarr_dataset_names = list(train_store["targets"].keys())
+    if target_dataset not in zarr_dataset_names:
+        raise ValueError(
+            f"Dataset '{target_dataset}' not found in zarr. Available: {', '.join(zarr_dataset_names)}"
+        )
+
+    zarr_band_names = [str(v) for v in train_store["targets"].attrs["band_names"]]
+    band_to_idx = {name: idx for idx, name in enumerate(zarr_band_names)}
+
+    zarr_all_traits = [
+        str(f).replace("X", "").replace(".tif", "")
+        for f in train_store[f"targets/{target_dataset}"].attrs["files"]
+    ]
+    traits = (
+        [str(v) for v in target_cfg.traits] if target_cfg.traits else zarr_all_traits
     )
+    if not traits:
+        raise ValueError("data.targets.traits must not be empty after resolution.")
 
-    best_filename = OmegaConf.select(cfg, "training.checkpoint.best_filename")
-    last_filename = OmegaConf.select(cfg, "training.checkpoint.last_filename")
-    best_name = str(best_filename) if best_filename else f"{run_name}_best.pth"
-    last_name = str(last_filename) if last_filename else f"{run_name}.pth"
+    cfg_bands = [str(v) for v in target_cfg.bands]
+    if not cfg_bands:
+        raise ValueError("data.targets.bands must not be empty.")
 
-    return checkpoint_dir / best_name, checkpoint_dir / last_name
+    n_bands = len(zarr_band_names)
+    target_indices = [
+        trait_pos * n_bands + band_to_idx[band]
+        for trait_pos in range(len(traits))
+        for band in cfg_bands
+    ]
+    source_indices = [
+        trait_pos * n_bands + band_to_idx["source"] for trait_pos in range(len(traits))
+    ]
+
+    return target_dataset, traits, cfg_bands, target_indices, source_indices
+
+
+def predict_batch(
+    model: torch.nn.Module, X: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    valid_x = torch.isfinite(X).all(dim=1, keepdim=True)
+    X = torch.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    X = torch.clamp(X, min=-1e4, max=1e4)
+    return model(X), valid_x
