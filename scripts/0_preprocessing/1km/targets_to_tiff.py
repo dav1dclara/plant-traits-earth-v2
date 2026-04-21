@@ -10,27 +10,19 @@ pixel-perfect alignment with all predictor layers.
 Output filenames use the trait ID without the "_mean" suffix.
 
 Usage:
-    python parquet_to_raster.py               # skip already-written files
-    python parquet_to_raster.py --overwrite   # reprocess all traits
+    python targets_to_tiff.py               # skip already-written files
+    python targets_to_tiff.py --overwrite   # reprocess all traits
 """
 
 import argparse
-import multiprocessing
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import rasterio
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TaskProgressColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 os.environ.setdefault("GDAL_NUM_THREADS", "ALL_CPUS")
 
@@ -38,8 +30,7 @@ PARQUET_PATH = Path("/scratch3/plant-traits-v2/data/1km/raw/Y.parquet")
 REF_PATH = Path(
     "/scratch3/plant-traits-v2/data/1km/raw/eo_data/canopy_height/ETH_GlobalCanopyHeight_2020_v1.tif"
 )
-OUT_DIR = PARQUET_PATH.parents[1] / "processed" / "targets"
-N_WORKERS = min(8, multiprocessing.cpu_count())
+OUT_DIR = PARQUET_PATH.parents[1] / "targets" / "comb"
 
 parser = argparse.ArgumentParser(description="Convert trait parquet to GeoTIFFs.")
 parser.add_argument(
@@ -48,63 +39,6 @@ parser.add_argument(
 args = parser.parse_args()
 
 console = Console()
-
-
-def _write_trait(args):
-    """Worker: build both raster bands and write one trait GeoTIFF."""
-    (
-        trait,
-        trait_vals,
-        row_idx,
-        col_idx,
-        source_vals,
-        n_rows,
-        n_cols,
-        transform_tuple,
-        crs_wkt,
-        out_dir,
-    ) = args
-
-    import numpy as np
-    import rasterio
-    from affine import Affine
-    from rasterio.crs import CRS
-
-    transform = Affine(*transform_tuple)
-    crs = CRS.from_wkt(crs_wkt)
-
-    trait_arr = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
-    trait_arr[row_idx, col_idx] = trait_vals
-
-    source_arr = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
-    source_arr[row_idx, col_idx] = source_vals
-
-    trait_id = trait.removesuffix("_mean")
-    out_path = Path(out_dir) / f"{trait_id}.tif"
-    with rasterio.open(
-        out_path,
-        "w",
-        driver="GTiff",
-        height=n_rows,
-        width=n_cols,
-        count=2,
-        dtype="float32",
-        crs=crs,
-        transform=transform,
-        nodata=float("nan"),
-        compress="zstd",
-        zstd_level=3,
-        predictor=3,
-        tiled=True,
-        blockxsize=256,
-        blockysize=256,
-    ) as dst:
-        dst.write(trait_arr, 1)
-        dst.write(source_arr, 2)
-        dst.descriptions = ["mean", "source"]
-
-    return trait_id, out_path.stat().st_size / 1e6
-
 
 # ---------------------------------------------------------------------------
 
@@ -132,49 +66,68 @@ if not in_bounds.all():
 
 source_map = {"g": 1.0, "s": 2.0}
 source_vals = df["source"].map(source_map).values.astype(np.float32)
+source_arr = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
+source_arr[row_idx, col_idx] = source_vals
 
 trait_cols = [c for c in df.columns if c not in ("x", "y", "source")]
-console.print(f"  {len(trait_cols)} traits to export  ({N_WORKERS} workers)\n")
+trait_cols = [
+    t
+    for t in trait_cols
+    if args.overwrite or not (OUT_DIR / f"{t.removesuffix('_mean')}.tif").exists()
+]
+console.print(
+    f"  {len(trait_cols)} traits to write  "
+    f"({len([c for c in df.columns if c not in ('x', 'y', 'source')]) - len(trait_cols)} skipped)\n"
+)
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-transform_tuple = tuple(transform)[:6]
-crs_wkt = crs.to_wkt()
-
-jobs = [
-    (
-        trait,
-        df[trait].values.astype(np.float32),
-        row_idx,
-        col_idx,
-        source_vals,
-        n_rows,
-        n_cols,
-        transform_tuple,
-        crs_wkt,
-        str(OUT_DIR),
-    )
-    for trait in trait_cols
-    if args.overwrite or not (OUT_DIR / f"{trait.removesuffix('_mean')}.tif").exists()
-]
-console.print(
-    f"  {len(jobs)} traits to write  ({len(trait_cols) - len(jobs)} skipped)\n"
-)
+# Pre-allocate once and reuse — avoids repeated 2 GB allocation per trait
+trait_arr = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
 
 with Progress(
+    SpinnerColumn(),
     TextColumn("[bold cyan]{task.description}"),
-    BarColumn(),
-    TaskProgressColumn(),
     TimeElapsedColumn(),
     console=console,
 ) as progress:
-    task = progress.add_task("Writing traits ...", total=len(trait_cols))
+    for trait in trait_cols:
+        task = progress.add_task(
+            f"Writing {trait.removesuffix('_mean')} ...", total=None
+        )
 
-    with ProcessPoolExecutor(max_workers=N_WORKERS) as pool:
-        futures = {pool.submit(_write_trait, job): job[0] for job in jobs}
-        for future in as_completed(futures):
-            trait_id, size_mb = future.result()
-            progress.advance(task)
-            console.print(f"  [green]✓[/green] {trait_id:<25} {size_mb:.2f} MB")
+        trait_arr.fill(np.nan)
+        trait_arr[row_idx, col_idx] = df[trait].values.astype(np.float32)
+
+        trait_id = trait.removesuffix("_mean")
+        out_path = OUT_DIR / f"{trait_id}.tif"
+        with rasterio.open(
+            out_path,
+            "w",
+            driver="GTiff",
+            height=n_rows,
+            width=n_cols,
+            count=2,
+            dtype="float32",
+            crs=crs,
+            transform=transform,
+            nodata=float("nan"),
+            compress="zstd",
+            zstd_level=3,
+            tiled=True,
+            blockxsize=256,
+            blockysize=256,
+        ) as dst:
+            dst.write(trait_arr, 1)
+            dst.write(source_arr, 2)
+            dst.descriptions = ["mean", "source"]
+
+        size_mb = out_path.stat().st_size / 1e6
+        progress.update(
+            task,
+            description=f"[green]✓[/green] {trait_id:<25} {size_mb:.2f} MB",
+            completed=1,
+            total=1,
+        )
 
 console.print(f"\n[bold green]Done![/bold green] Output: {OUT_DIR}")

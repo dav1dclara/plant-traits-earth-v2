@@ -1,13 +1,12 @@
 """
 Write predictor columns from eo_predict_imputed.parquet to GeoTIFF rasters.
 
-Missing values are restored by applying eo_predict_mask.parquet before writing
-(the imputed file had NaNs filled in for AoA calculation; the mask flags which
-values were imputed and should be set back to nodata).
+Only the masked version of each predictor is written — imputed values (flagged by
+eo_predict_mask.parquet) are set back to nodata, restoring the original missing values.
 
 Grid is snapped to the EO reference raster (canopy height) to guarantee
 pixel-perfect alignment with all other layers.
-Output directory: /scratch3/plant-traits-v2/data/1km/processed/predictors/
+Output directory: /scratch3/plant-traits-v2/data/1km/predictors/
 
 Usage:
     python predictors_to_tiff.py               # skip already-written files
@@ -35,7 +34,7 @@ MASK_PATH = Path(
 REF_PATH = Path(
     "/scratch3/plant-traits-v2/data/1km/raw/eo_data/canopy_height/ETH_GlobalCanopyHeight_2020_v1.tif"
 )
-OUT_BASE = Path("/scratch3/plant-traits-v2/data/1km/processed/predictors")
+OUT_BASE = Path("/scratch3/plant-traits-v2/data/1km/predictors")
 
 # Maps column name prefix → output subfolder (mirrors the 22km structure)
 SUBFOLDER_RULES = [
@@ -135,7 +134,7 @@ with Progress(
         nodata = NODATA[dtype_str]
         np_dtype = np.dtype(dtype_str)
         out_dir = OUT_BASE / col_subfolder(col)
-        existing = [out_dir / f"{col}{s}.tif" for s in ("", "_masked")]
+        existing = [out_dir / f"{col}.tif"]
         if not args.overwrite and all(p.exists() for p in existing):
             progress.console.print(f"  [dim]skip[/dim] {col}")
             continue
@@ -153,15 +152,14 @@ with Progress(
             pq.read_table(MASK_PATH, columns=[col]).to_pandas()[col].values[in_bounds]
         )
 
-        # Full array with all values (imputed included)
-        arr_orig = np.full((n_rows, n_cols), nodata, dtype=np_dtype)
-        arr_orig[row_idx, col_idx] = eo_vals.astype(np_dtype)
+        arr = np.full((n_rows, n_cols), nodata, dtype=np_dtype)
+        arr[row_idx, col_idx] = eo_vals.astype(np_dtype)
+        arr[row_idx[mask_vals], col_idx[mask_vals]] = nodata
 
-        # Masked array — imputed positions restored to nodata
-        arr_masked = arr_orig.copy()
-        arr_masked[row_idx[mask_vals], col_idx[mask_vals]] = nodata
-
-        tif_opts = dict(
+        out_path = out_dir / f"{col}.tif"
+        with rasterio.open(
+            out_path,
+            "w",
             driver="GTiff",
             height=n_rows,
             width=n_cols,
@@ -176,21 +174,14 @@ with Progress(
             tiled=True,
             blockxsize=256,
             blockysize=256,
-        )
+        ) as dst:
+            dst.write(arr, 1)
+            dst.descriptions = [col]
 
-        for suffix, arr in [("", arr_orig), ("_masked", arr_masked)]:
-            out_path = out_dir / f"{col}{suffix}.tif"
-            with rasterio.open(out_path, "w", **tif_opts) as dst:
-                dst.write(arr, 1)
-                dst.descriptions = [col]
-
-        sizes = " / ".join(
-            f"{(out_dir / f'{col}{s}.tif').stat().st_size / 1e6:.2f} MB"
-            for s in ("", "_masked")
-        )
+        size_mb = out_path.stat().st_size / 1e6
         progress.update(
             task,
-            description=f"[green]✓[/green] [{col_subfolder(col)}] {col}  {sizes}",
+            description=f"[green]✓[/green] [{col_subfolder(col)}] {col}  {size_mb:.2f} MB",
             completed=1,
             total=1,
         )

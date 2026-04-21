@@ -12,6 +12,8 @@ from rich.console import Console
 from rich.progress import track
 
 from ptev2.data.splitting import (
+    build_cell_index,
+    build_cell_labels,
     build_histograms,
     build_split_gdf,
     extract_cell_values,
@@ -23,7 +25,9 @@ console = Console()
 
 
 @hydra.main(
-    version_base=None, config_path="../../config/preprocessing", config_name="splitting"
+    version_base=None,
+    config_path="../../config/preprocessing",
+    config_name="splitting_1km",
 )
 def main(cfg: DictConfig) -> None:  # Config
     # Target settings
@@ -105,10 +109,25 @@ def main(cfg: DictConfig) -> None:  # Config
     n_features = len(gbif_rasters) * n_bands
     all_cell_values = [[None] * n_features for _ in range(n_cells_all)]
 
+    # Pre-compute cell label raster and sort index once (amortised over all traits)
+    console.print("Pre-computing H3 cell label raster...")
+    with rasterio.open(gbif_rasters[0]) as ref:
+        ref_shape = ref.shape
+        ref_transform = ref.transform
+    cell_labels = build_cell_labels(polys_raster_crs, ref_shape, ref_transform)
+    console.print(f"Cell label raster ready: {ref_shape[0]}×{ref_shape[1]}")
+
+    console.print("Building cell sort index...")
+    cell_index = build_cell_index(cell_labels, n_cells_all)
+    del cell_labels  # no longer needed; cell_index encodes the same information
+    console.print("Cell index ready")
+
     for t, raster_path in enumerate(
         track(gbif_rasters, description="Extracting pixel values...")
     ):
-        cell_vals = extract_cell_values(raster_path, polys_raster_crs, bands_for_jsd)
+        cell_vals = extract_cell_values(
+            raster_path, polys_raster_crs, bands_for_jsd, cell_index=cell_index
+        )
         for c, band_vals in enumerate(cell_vals):
             for b, vals in enumerate(band_vals):
                 all_cell_values[c][t * n_bands + b] = vals
@@ -141,7 +160,10 @@ def main(cfg: DictConfig) -> None:  # Config
 
     # Compute histograms for each cell and trait
     console.print("[bold]\nComputing histograms[/bold]")
-    source_band_pos = bands_for_jsd.index(7) if 7 in bands_for_jsd else None
+    source_band = cfg.jsd.source_band
+    source_band_pos = (
+        bands_for_jsd.index(source_band) if source_band in bands_for_jsd else None
+    )
     source_feature_indices = (
         {t * n_bands + source_band_pos for t in range(len(gbif_rasters))}
         if source_band_pos is not None

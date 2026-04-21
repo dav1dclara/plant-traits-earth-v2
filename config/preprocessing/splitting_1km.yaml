@@ -1,7 +1,7 @@
 data_dir: "/scratch3/plant-traits-v2/data/"
 
 targets:
-  resolution_km: "22"
+  resolution_km: 1
   source: "comb"
 
 h3:
@@ -13,7 +13,8 @@ splitting:
   test_frac: 0.10
 
 jsd:
-  bands: [1, 2, 3, 4, 5, 7]  # mean, std, median, q05, q95 (skip band 6 = count), source
+  bands: [1, 2]  # band 1 = mean, band 2 = source (only bands available at 1km)
+  source_band: 2  # band index of the source (categorical) band
   n_restarts: 200
   n_bins: 50
   random_seed: 42

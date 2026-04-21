@@ -2,9 +2,14 @@
 Plot per-trait value distributions for train, val, and test splits.
 
 For each trait, overlays the three distributions on a single axis.
-Reads split assignments from h3_unified.gpkg and samples values from GBIF rasters.
+Reads split assignments from the split GeoPackage and samples values from target rasters.
+
+Usage:
+    python plot_split_distributions.py --resolution 22   # default
+    python plot_split_distributions.py --resolution 1
 """
 
+import argparse
 from pathlib import Path
 
 import geopandas as gpd
@@ -15,20 +20,39 @@ import rasterio.features
 from rich.progress import track
 from scipy.stats import gaussian_kde
 
-SPLITS_DIR = Path("/scratch3/plant-traits-v2/data/22km/splits")
-COMB_DIR = Path("/scratch3/plant-traits-v2/data/22km/targets/comb")
+DATA_DIR = Path("/scratch3/plant-traits-v2/data")
 OUT_DIR = Path(__file__).parents[2] / "viz" / "splits"
+
+BANDS_BY_RES = {
+    "22": ["mean", "std", "median", "q05", "q95", "source"],
+    "1": ["mean", "source"],
+}
 
 H3_RESOLUTION = 2
 SOURCE = "comb"
-DATA_RES = "22km"
-SPLITS_FILE = SPLITS_DIR / f"h3_splits_res{H3_RESOLUTION}_{SOURCE}_{DATA_RES}.gpkg"
-BANDS = ["mean", "std", "median", "q05", "q95", "source"]
 SPLIT_COLORS = {"train": "#2196F3", "val": "#FF9800", "test": "#4CAF50"}
-
-MAX_TRAITS = None  # TODO: remove to plot all traits
+MAX_TRAITS = None  # set to an int to limit number of traits plotted
 
 plt.rcParams["font.family"] = "monospace"
+
+parser = argparse.ArgumentParser(description="Plot split distributions.")
+parser.add_argument(
+    "--resolution",
+    choices=["1", "22"],
+    default="22",
+    help="Data resolution in km (default: 22).",
+)
+args = parser.parse_args()
+
+RES = args.resolution
+BANDS = BANDS_BY_RES[RES]
+COMB_DIR = DATA_DIR / f"{RES}km" / "targets" / SOURCE
+SPLITS_FILE = (
+    DATA_DIR
+    / f"{RES}km"
+    / "splits"
+    / f"h3_splits_res{H3_RESOLUTION}_{SOURCE}_{RES}km.gpkg"
+)
 
 
 def extract_cell_values_all_bands(
@@ -96,7 +120,7 @@ def plot_trait_row(
                     label=split,
                 )
             ax.set_xticks(x + width)
-            ax.set_xticklabels(["GBIF", "SPLOT"])
+            ax.set_xticklabels(["GBIF", "sPlot"])
             ax.set_ylabel("fraction")
             ax.set_ylim(0, 1)
             ax.spines[["top", "right"]].set_visible(False)
@@ -118,7 +142,6 @@ def plot_trait_row(
         ax.set_ylabel("density")
         ax.spines[["top", "right"]].set_visible(False)
 
-    # Legend in the mean subplot (first), one item per row
     axes[0].legend(frameon=False, fontsize=8, ncol=1, loc="upper left")
 
 
@@ -134,30 +157,30 @@ def main() -> None:
 
     n_rows = len(traits)
     n_cols = len(BANDS)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(4 * n_cols, 3 * n_rows),
+        squeeze=False,
+    )
 
-    for row, trait in enumerate(
-        track(traits, description="Extracting pixel values...")
-    ):
+    for row, trait in enumerate(track(traits, description="Plotting traits...")):
         plot_trait_row(axes[row], trait, gdf, cell_polys)
 
-    # Column titles (band names) on top row only
     for ax, band_name in zip(axes[0], BANDS):
         ax.set_title(band_name, fontsize=10)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = (
-        OUT_DIR / f"split_distributions_res{H3_RESOLUTION}_{SOURCE}_{DATA_RES}.png"
-    )
+    out_path = OUT_DIR / f"split_distributions_res{H3_RESOLUTION}_{SOURCE}_{RES}km.png"
     fig.tight_layout(rect=[0.02, 0, 1, 1])
 
-    # Add row labels after tight_layout so positions are finalised
     for row, trait in enumerate(traits):
         bbox = axes[row, 0].get_position()
         y_center = (bbox.y0 + bbox.y1) / 2
         fig.text(
             0.01, y_center, trait, va="center", ha="left", fontsize=11, rotation=90
         )
+
     fig.savefig(out_path, dpi=150)
     print(f"Saved: {out_path}")
     plt.show()
