@@ -12,6 +12,8 @@ from rich.console import Console
 from rich.progress import track
 
 from ptev2.data.splitting import (
+    build_cell_index,
+    build_cell_labels,
     build_histograms,
     build_split_gdf,
     extract_cell_values,
@@ -37,7 +39,9 @@ def _derive_source_tag(active_sources: list[str], legacy_source: str | None) -> 
 
 
 @hydra.main(
-    version_base=None, config_path="../../config/preprocessing", config_name="splitting"
+    version_base=None,
+    config_path="../../config/preprocessing",
+    config_name="splitting_1km",
 )
 def main(cfg: DictConfig) -> None:  # Config
     # Target settings

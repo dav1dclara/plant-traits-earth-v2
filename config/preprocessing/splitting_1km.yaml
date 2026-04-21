@@ -1,0 +1,20 @@
+data_dir: "/scratch3/plant-traits-v2/data/"
+
+targets:
+  resolution_km: 1
+  source: "comb"
+
+h3:
+  resolution: 1
+
+splitting:
+  train_frac: 0.70
+  val_frac: 0.20
+  test_frac: 0.10
+
+jsd:
+  bands: [1, 2]  # band 1 = mean, band 2 = source (only bands available at 1km)
+  source_band: 2  # band index of the source (categorical) band
+  n_restarts: 200
+  n_bins: 50
+  random_seed: 42
