@@ -16,9 +16,10 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
-import rasterio.features
 from rich.progress import track
 from scipy.stats import gaussian_kde
+
+from ptev2.data.splitting import build_cell_index, build_cell_labels
 
 DATA_DIR = Path("/scratch3/plant-traits-v2/data")
 OUT_DIR = Path(__file__).parents[2] / "viz" / "splits"
@@ -28,10 +29,9 @@ BANDS_BY_RES = {
     "1": ["mean", "source"],
 }
 
-H3_RESOLUTION = 2
+H3_RESOLUTION_BY_RES = {"22": 2, "1": 1}
 SOURCE = "comb"
 SPLIT_COLORS = {"train": "#2196F3", "val": "#FF9800", "test": "#4CAF50"}
-MAX_TRAITS = None  # set to an int to limit number of traits plotted
 
 plt.rcParams["font.family"] = "monospace"
 
@@ -42,9 +42,17 @@ parser.add_argument(
     default="22",
     help="Data resolution in km (default: 22).",
 )
+parser.add_argument(
+    "--n-traits",
+    type=int,
+    default=None,
+    help="Only plot the first N traits (default: all).",
+)
 args = parser.parse_args()
 
 RES = args.resolution
+MAX_TRAITS = args.n_traits
+H3_RESOLUTION = H3_RESOLUTION_BY_RES[RES]
 BANDS = BANDS_BY_RES[RES]
 COMB_DIR = DATA_DIR / f"{RES}km" / "targets" / SOURCE
 SPLITS_FILE = (
@@ -56,20 +64,14 @@ SPLITS_FILE = (
 
 
 def extract_cell_values_all_bands(
-    raster_path: Path, cell_polygons_raster_crs: list
+    raster_path: Path,
+    cell_polygons_raster_crs: list,
+    cell_index: tuple[np.ndarray, np.ndarray],
 ) -> dict[str, list[np.ndarray]]:
-    """Returns {band_name: [array_of_values_per_cell]}."""
+    """Returns {band_name: [array_of_values_per_cell]} using pre-computed sort index."""
+    n_cells = len(cell_polygons_raster_crs)
+    order, boundaries = cell_index
     with rasterio.open(raster_path) as src:
-        cell_labels = rasterio.features.rasterize(
-            [
-                (geom.__geo_interface__, idx + 1)
-                for idx, geom in enumerate(cell_polygons_raster_crs)
-            ],
-            out_shape=src.shape,
-            transform=src.transform,
-            fill=0,
-            dtype=np.int32,
-        )
         descriptions = [d.lower() for d in src.descriptions]
         band_data = {}
         for band_name in BANDS:
@@ -77,10 +79,12 @@ def extract_cell_values_all_bands(
             data = src.read(band_idx).astype(float)
             if src.nodata is not None:
                 data[data == src.nodata] = np.nan
-            band_data[band_name] = [
-                (lambda v: v[np.isfinite(v)])(data[cell_labels == idx + 1])
-                for idx in range(len(cell_polygons_raster_crs))
-            ]
+            sorted_band = data.ravel()[order]
+            cell_arrays = []
+            for idx in range(n_cells):
+                v = sorted_band[boundaries[idx + 1] : boundaries[idx + 2]]
+                cell_arrays.append(v[np.isfinite(v)])
+            band_data[band_name] = cell_arrays
     return band_data
 
 
@@ -89,9 +93,12 @@ def plot_trait_row(
     trait: str,
     gdf: gpd.GeoDataFrame,
     cell_polys: list,
+    cell_index: tuple[np.ndarray, np.ndarray],
 ) -> None:
     raster_path = COMB_DIR / f"{trait}.tif"
-    band_cell_values = extract_cell_values_all_bands(raster_path, cell_polys)
+    band_cell_values = extract_cell_values_all_bands(
+        raster_path, cell_polys, cell_index
+    )
 
     for ax, band_name in zip(axes, BANDS):
         split_values: dict[str, list[np.ndarray]] = {"train": [], "val": [], "test": []}
@@ -151,9 +158,16 @@ def main() -> None:
 
     with rasterio.open(COMB_DIR / f"{traits[0]}.tif") as src:
         raster_crs = src.crs.to_string()
+        ref_shape = src.shape
+        ref_transform = src.transform
 
     gdf_raster = gdf.to_crs(raster_crs)
     cell_polys = list(gdf_raster.geometry)
+
+    print("Pre-computing cell index...")
+    cell_labels = build_cell_labels(cell_polys, ref_shape, ref_transform)
+    cell_index = build_cell_index(cell_labels, len(cell_polys))
+    del cell_labels
 
     n_rows = len(traits)
     n_cols = len(BANDS)
@@ -165,7 +179,7 @@ def main() -> None:
     )
 
     for row, trait in enumerate(track(traits, description="Plotting traits...")):
-        plot_trait_row(axes[row], trait, gdf, cell_polys)
+        plot_trait_row(axes[row], trait, gdf, cell_polys, cell_index)
 
     for ax, band_name in zip(axes[0], BANDS):
         ax.set_title(band_name, fontsize=10)
