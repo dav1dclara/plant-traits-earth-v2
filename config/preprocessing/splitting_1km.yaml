@@ -5,7 +5,7 @@ targets:
   source: "comb"
 
 h3:
-  resolution: 1
+  resolution: 2
 
 splitting:
   train_frac: 0.70
