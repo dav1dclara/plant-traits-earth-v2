@@ -1,0 +1,5 @@
+_target_: ptev2.loss.WeightedMaskedDenseLoss
+error_type: huber
+huber_delta: 1.0
+w_splot: 1.0
+w_gbif: 0.1

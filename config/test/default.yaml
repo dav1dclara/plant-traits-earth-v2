@@ -4,6 +4,7 @@ checkpoint_dir: /scratch3/plant-traits-v2/checkpoints/
 output_dir: /scratch3/plant-traits-v2/test_outputs/
 prediction_out_dir: /scratch3/plant-traits-v2/predictions/
 prediction_tif_name: null
+write_all_map: false
 test_split: test
 save_arrays: true
 save_full_trait_metrics: true

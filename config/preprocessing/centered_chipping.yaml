@@ -1,0 +1,42 @@
+paths:
+  data_root: /scratch3/plant-traits-v2/data
+  predictors_dirname: eo_data_processed
+  targets_splot_dirname: splot
+  targets_gbif_dirname: gbif
+  splits_relpath: splits/h3_splits_res2_splot_22km.gpkg
+  chips_subdir: chips_centered
+
+settings:
+  resolution_km: 22
+  patch_size: 3
+  stride: 1
+  # Cap GBIF-only train centers relative to sPlot train centers.
+  train_gbif_to_splot_ratio: 1.0
+  random_seed: 42
+  max_train_centers: null
+  max_val_centers: null
+  max_test_centers: null
+  export_split_gpkg: true
+  export_split_gpkg_crs: EPSG:6933
+  # Band names are resolved against each raster's descriptions to handle
+  # differing sPlot/GBIF band order.
+  target_band_names:
+    mean: mean
+    std: std
+    q05: q05
+    q95: q95
+    count: count
+
+data:
+  predictors:
+    canopy_height:
+      use: true
+    modis:
+      use: true
+    soil_grids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
+  traits: [] # empty => all traits from sPlot

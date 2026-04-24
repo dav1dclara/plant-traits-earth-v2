@@ -37,10 +37,15 @@ def resolve_model_cfg(cfg: DictConfig) -> DictConfig:
 
 
 def resolve_train_zarr_dir(cfg: DictConfig) -> Path:
+    zarr_override = OmegaConf.select(cfg, "data.zarr_dir")
+    if zarr_override:
+        return Path(str(zarr_override))
+
+    chips_subdir = str(OmegaConf.select(cfg, "data.chips_subdir") or "chips")
     return (
         Path(str(cfg.data.root_dir))
         / f"{cfg.data.resolution_km}km"
-        / "chips"
+        / chips_subdir
         / f"patch{cfg.data.patch_size}_stride{cfg.data.stride}"
     )
 
@@ -61,10 +66,14 @@ def build_target_layout(
     zarr_band_names = [str(v) for v in train_store["targets"].attrs["band_names"]]
     band_to_idx = {name: idx for idx, name in enumerate(zarr_band_names)}
 
-    zarr_all_traits = [
-        str(f).replace("X", "").replace(".tif", "")
-        for f in train_store[f"targets/{target_dataset}"].attrs["files"]
-    ]
+    trait_names_attr = train_store["targets"].attrs.get("trait_names")
+    if trait_names_attr is not None:
+        zarr_all_traits = [str(v) for v in trait_names_attr]
+    else:
+        zarr_all_traits = [
+            str(f).replace("X", "").replace(".tif", "")
+            for f in train_store[f"targets/{target_dataset}"].attrs["files"]
+        ]
     traits = (
         [str(v) for v in target_cfg.traits] if target_cfg.traits else zarr_all_traits
     )
@@ -86,6 +95,19 @@ def build_target_layout(
     ]
 
     return target_dataset, traits, cfg_bands, target_indices, source_indices
+
+
+def resolve_eval_source_value(target_dataset: str) -> int:
+    """Return source code used for evaluation metrics/masking.
+
+    Source convention:
+      1 = GBIF
+      2 = sPlot
+    """
+    dataset = str(target_dataset).lower()
+    if dataset == "supervision_gbif_only":
+        return 1
+    return 2
 
 
 def predict_batch(

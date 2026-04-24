@@ -1,13 +1,23 @@
 # @package _global_
 defaults:
-  - /models: respatch
+  - /models: small_trait_fcn
+  - /loss: weighted_masked_dense
   - _self_
 
 data:
   root_dir: /scratch3/plant-traits-v2/data/
   resolution_km: 22
-  patch_size: 15
-  stride: 10
+  chips_subdir: chips_centered
+  patch_size: 3
+  stride: 1
+
+  # Optional quick-run knobs (keep at 1.0 for full-data training).
+  train_fraction: 1.0
+  val_fraction: 1.0
+
+  predictor_validity_masks:
+    enabled: true
+    groups: [canopy_height, modis, soil_grids, vodca, worldclim]
 
   predictors:
     canopy_height:
@@ -22,35 +32,32 @@ data:
       use: true
 
   targets:
-    dataset: comb
-    traits: []  # Empty means: all traits
+    dataset: supervision
+    traits: []
     bands: [mean]
 
 data_loaders:
-  batch_size: 32
+  batch_size: 64
   num_workers: 4
 
 train:
   seed: 0
   run_name: null
-  group: null
-  epochs: 50
+  group: small_trait_fcn_22km
+  epochs: 60
+  init_checkpoint: null
+  init_checkpoint_strict: false
 
   optimizer:
-    _target_: torch.optim.Adam
-    lr: 2e-4
+    _target_: torch.optim.AdamW
+    lr: 3e-4
     weight_decay: 1e-5
 
-  loss:
-    _target_: ptev2.loss.WeightedMaskedDenseLoss
-    error_type: smooth_l1
-    huber_delta: 1.0
-    w_gbif: 0.5
-    w_splot: 8.0
+  loss: ${loss}
 
   scheduler:
     _target_: torch.optim.lr_scheduler.StepLR
-    step_size: 10
+    step_size: 15
     gamma: 0.7
 
   scheduler_step:

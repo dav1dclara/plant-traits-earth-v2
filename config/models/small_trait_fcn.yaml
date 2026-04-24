@@ -1,0 +1,6 @@
+_target_: ptev2.models.small_trait_fcn.SmallTraitFCN
+base_channels: 64
+num_groups: 8
+head_mode: joint
+trait_head_hidden_channels: 16
+block3_dilation: 1

@@ -1,0 +1,24 @@
+paths:
+  data_root: /scratch3/plant-traits-v2/data
+  targets_dirname: splot
+  splits_dirname: splits
+
+settings:
+  resolution_km: 22
+  h3_resolution: 2
+  train_frac: 0.60
+  val_frac: 0.20
+  test_frac: 0.20
+  n_restarts: 200
+  n_bins: 50
+  random_seed: 42
+  stratify_by_hemisphere: true
+  min_south_cells_per_split: 5
+  min_south_fraction_per_split: 0.05
+  enforce_full_trait_coverage: true
+  # Names are mapped to raster band indices using GeoTIFF band descriptions.
+  # This is robust to non-standard band order.
+  jsd_band_names: [mean, std, median, q05, q95]
+
+data:
+  traits: [] # empty => all available sPlot traits
