@@ -16,17 +16,17 @@ from rich.progress import track
 from scipy.stats import gaussian_kde
 
 SPLITS_DIR = Path("/scratch3/plant-traits-v2/data/22km/splits")
-COMB_DIR = Path("/scratch3/plant-traits-v2/data/22km/targets/comb")
+COMB_DIR = Path("/scratch3/plant-traits-v2/data/22km/splot/")
 OUT_DIR = Path(__file__).parents[2] / "viz" / "splits"
 
-H3_RESOLUTION = 2
-SOURCE = "comb"
+H3_RESOLUTION = 1
+SOURCE = "splot"
 DATA_RES = "22km"
 SPLITS_FILE = SPLITS_DIR / f"h3_splits_res{H3_RESOLUTION}_{SOURCE}_{DATA_RES}.gpkg"
-BANDS = ["mean", "std", "median", "q05", "q95", "source"]
+BANDS = ["mean", "std", "median", "q05", "q95"]
 SPLIT_COLORS = {"train": "#2196F3", "val": "#FF9800", "test": "#4CAF50"}
 
-MAX_TRAITS = None  # TODO: remove to plot all traits
+MAX_TRAITS = 6  # TODO: remove to plot all traits
 
 plt.rcParams["font.family"] = "monospace"
 

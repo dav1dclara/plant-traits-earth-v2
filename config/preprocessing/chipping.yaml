@@ -2,11 +2,12 @@ paths:
   predictors_dir: /scratch3/plant-traits-v2/data/22km/eo_data_processed/
   targets_dir: /scratch3/plant-traits-v2/data/22km/targets/
   splits_file: /scratch3/plant-traits-v2/data/22km/splits/h3_splits_res1_comb_22km.gpkg
-  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips/
+  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips_luca/
 
 settings:
-  patch_size: 15
-  stride: 10
+  patch_size: 7
+  stride: 3
+  output_name: null
   save_all: true
 
 data:

@@ -55,7 +55,11 @@ def main(cfg: DictConfig) -> None:
             target_paths[name] = sorted(tif_dir.glob("*.tif"))
 
     # define zarr output dir
-    output_dir = zarr_dir / f"patch{patch_size}_stride{stride}"
+    output_name = cfg.settings.get("output_name", None)
+    if output_name:
+        output_dir = zarr_dir / str(output_name)
+    else:
+        output_dir = zarr_dir / f"patch{patch_size}_stride{stride}"
 
     # print configuration summary
     console.print("[bold]Paths:[/bold]")

@@ -6,6 +6,7 @@ defaults:
 data:
   root_dir: /scratch3/plant-traits-v2/data/
   resolution_km: 22
+  chips_dirname: chips_luca
   patch_size: 15
   stride: 10
 
@@ -25,10 +26,15 @@ data:
     dataset: comb
     traits: []  # Empty means: all traits
     bands: [mean]
+    # Used only when the selected target dataset has no dedicated "source" band.
+    # 1=GBIF, 2=sPlot. For source-less datasets, all valid labels get this code.
+    source_value_if_missing: 2
 
 data_loaders:
   batch_size: 32
   num_workers: 4
+  train_fraction: 0.25
+  val_fraction: 0.5
 
 train:
   seed: 0
@@ -46,7 +52,7 @@ train:
     error_type: smooth_l1
     huber_delta: 1.0
     w_gbif: 0.5
-    w_splot: 8.0
+    w_splot: 1
 
   scheduler:
     _target_: torch.optim.lr_scheduler.StepLR
@@ -63,6 +69,8 @@ train:
     enabled: true
     patience: 15
     min_delta: 0.0
+    monitor: val_rmse_splot
+    mode: min
 
   logging:
     log_val_mae_splot: true
@@ -81,4 +89,4 @@ checkpoint_dir: /scratch3/plant-traits-v2/checkpoints/
 wandb:
   enabled: true
   entity: plant-traits-v2
-  project: Project_PTV2
+  project: Project_PTV2_test_luca

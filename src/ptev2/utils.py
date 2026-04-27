@@ -37,15 +37,11 @@ def resolve_model_cfg(cfg: DictConfig) -> DictConfig:
 
 
 def resolve_train_zarr_dir(cfg: DictConfig) -> Path:
-    zarr_override = OmegaConf.select(cfg, "data.zarr_dir")
-    if zarr_override:
-        return Path(str(zarr_override))
-
-    chips_subdir = str(OmegaConf.select(cfg, "data.chips_subdir") or "chips")
+    chips_dirname = str(OmegaConf.select(cfg, "data.chips_dirname") or "chips")
     return (
         Path(str(cfg.data.root_dir))
         / f"{cfg.data.resolution_km}km"
-        / chips_subdir
+        / chips_dirname
         / f"patch{cfg.data.patch_size}_stride{cfg.data.stride}"
     )
 
@@ -53,27 +49,46 @@ def resolve_train_zarr_dir(cfg: DictConfig) -> Path:
 def build_target_layout(
     train_cfg: DictConfig,
     train_store: zarr.Group,
-) -> tuple[str, list[str], list[str], list[int], list[int]]:
+) -> tuple[str, list[str], list[str], list[int], list[int], int]:
     target_cfg = train_cfg.data.targets
-    target_dataset = str(target_cfg.dataset)
+    requested_target_dataset = str(target_cfg.dataset)
+    target_dataset = requested_target_dataset
 
     zarr_dataset_names = list(train_store["targets"].keys())
+    merge_gbif_splot_on_the_fly = False
     if target_dataset not in zarr_dataset_names:
-        raise ValueError(
-            f"Dataset '{target_dataset}' not found in zarr. Available: {', '.join(zarr_dataset_names)}"
-        )
+        if (
+            target_dataset == "comb"
+            and "gbif" in zarr_dataset_names
+            and "splot" in zarr_dataset_names
+        ):
+            merge_gbif_splot_on_the_fly = True
+            target_dataset = "__merged_gbif_splot__"
+        else:
+            raise ValueError(
+                f"Dataset '{target_dataset}' not found in zarr. Available: {', '.join(zarr_dataset_names)}"
+            )
 
     zarr_band_names = [str(v) for v in train_store["targets"].attrs["band_names"]]
     band_to_idx = {name: idx for idx, name in enumerate(zarr_band_names)}
 
-    trait_names_attr = train_store["targets"].attrs.get("trait_names")
-    if trait_names_attr is not None:
-        zarr_all_traits = [str(v) for v in trait_names_attr]
-    else:
-        zarr_all_traits = [
+    trait_ref_dataset = "splot" if merge_gbif_splot_on_the_fly else target_dataset
+    zarr_all_traits = [
+        str(f).replace("X", "").replace(".tif", "")
+        for f in train_store[f"targets/{trait_ref_dataset}"].attrs["files"]
+    ]
+
+    if merge_gbif_splot_on_the_fly:
+        gbif_traits = [
             str(f).replace("X", "").replace(".tif", "")
-            for f in train_store[f"targets/{target_dataset}"].attrs["files"]
+            for f in train_store["targets/gbif"].attrs["files"]
         ]
+        if set(gbif_traits) != set(zarr_all_traits):
+            raise ValueError(
+                "On-the-fly comb merge requires gbif and splot to have identical trait sets. "
+                f"gbif={len(gbif_traits)} traits, splot={len(zarr_all_traits)} traits."
+            )
+
     traits = (
         [str(v) for v in target_cfg.traits] if target_cfg.traits else zarr_all_traits
     )
@@ -90,24 +105,29 @@ def build_target_layout(
         for trait_pos in range(len(traits))
         for band in cfg_bands
     ]
-    source_indices = [
-        trait_pos * n_bands + band_to_idx["source"] for trait_pos in range(len(traits))
-    ]
+    source_band_idx = None if merge_gbif_splot_on_the_fly else band_to_idx.get("source")
 
-    return target_dataset, traits, cfg_bands, target_indices, source_indices
+    source_value_if_missing = int(
+        OmegaConf.select(target_cfg, "source_value_if_missing")
+        if OmegaConf.select(target_cfg, "source_value_if_missing") is not None
+        else 2
+    )
 
+    if source_band_idx is None:
+        source_indices = []
+    else:
+        source_indices = [
+            trait_pos * n_bands + source_band_idx for trait_pos in range(len(traits))
+        ]
 
-def resolve_eval_source_value(target_dataset: str) -> int:
-    """Return source code used for evaluation metrics/masking.
-
-    Source convention:
-      1 = GBIF
-      2 = sPlot
-    """
-    dataset = str(target_dataset).lower()
-    if dataset == "supervision_gbif_only":
-        return 1
-    return 2
+    return (
+        target_dataset,
+        traits,
+        cfg_bands,
+        target_indices,
+        source_indices,
+        source_value_if_missing,
+    )
 
 
 def predict_batch(

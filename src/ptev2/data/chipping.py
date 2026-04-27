@@ -215,9 +215,9 @@ def chip_rasters_to_zarr(
     """Chip predictor and target rasters into one zarr store per split.
 
     Computes a pixel-level split mask from the H3 grid, then for each split
-    slides a window of size `patch_size` with that split's stride. Every chip
-    touching the split's H3 cells is written to the split's zarr store, with
-    pixels from other splits set to NaN.
+    slides a window of size `patch_size` with that split's stride. Each chip is
+    assigned to exactly one split based on its center pixel. Pixels from other
+    splits inside that chip are set to NaN.
 
     Args:
         predictors: Dict mapping predictor name to list of source TIF paths.
@@ -290,16 +290,21 @@ def chip_rasters_to_zarr(
         named_splits = [s for s in group_splits if s != "all"]
         group_codes = {SPLIT_ENCODING[s] for s in named_splits}
         n_chips_per = {s: 0 for s in group_splits}
+        center_row = patch_size // 2
+        center_col = patch_size // 2
         for row in range(n_rows):
             for col in range(n_cols):
                 y_px, x_px = row * stride, col * stride
-                window_mask = pixel_split_mask[
-                    y_px : y_px + patch_size, x_px : x_px + patch_size
+                y_end = min(y_px + patch_size, height)
+                x_end = min(x_px + patch_size, width)
+                mask_chip = np.full((patch_size, patch_size), -1, dtype=np.int8)
+                mask_chip[: y_end - y_px, : x_end - x_px] = pixel_split_mask[
+                    y_px:y_end, x_px:x_end
                 ]
-                unique_codes = np.unique(window_mask)
-                for code in unique_codes:
-                    if code in group_codes:
-                        n_chips_per[code_to_name[code]] += 1
+                center_code = int(mask_chip[center_row, center_col])
+                if center_code in group_codes:
+                    n_chips_per[code_to_name[center_code]] += 1
+                unique_codes = np.unique(mask_chip)
                 if "all" in group_splits and any(c >= 0 for c in unique_codes):
                     n_chips_per["all"] += 1
         for s, n in n_chips_per.items():
@@ -402,12 +407,11 @@ def chip_rasters_to_zarr(
                         y_px:y_end, x_px:x_end
                     ]
 
+                    center_code = int(mask_chip[center_row, center_col])
                     unique_codes = np.unique(mask_chip)
-                    chip_splits = [
-                        s
-                        for s in group_splits
-                        if s != "all" and SPLIT_ENCODING[s] in unique_codes
-                    ]
+                    chip_splits = []
+                    if center_code in group_codes:
+                        chip_splits.append(code_to_name[center_code])
                     has_any_valid = any(c >= 0 for c in unique_codes)
                     if "all" in group_splits and has_any_valid:
                         chip_splits.append("all")

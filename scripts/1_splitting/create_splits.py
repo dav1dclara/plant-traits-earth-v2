@@ -30,7 +30,7 @@ def main(cfg: DictConfig) -> None:  # Config
     data_dir = Path(cfg.data_dir)
     source = cfg.targets.source
     resolution_km = cfg.targets.resolution_km
-    targets_dir = data_dir / f"{resolution_km}km" / "targets" / source
+    targets_dir = data_dir / f"{resolution_km}km" / source
 
     # H3 settings
     h3_resolution = cfg.h3.resolution
