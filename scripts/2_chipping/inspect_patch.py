@@ -4,18 +4,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
-ZARR_PATH = "/scratch3/plant-traits-v2/data/22km/chips/patch15_stride10/train.zarr"
-CHIP_IDX = 2489
+ZARR_PATH = "/scratch3/plant-traits-v2/data/22km/chips/patch25_stride25/train.zarr"
+CHIP_IDX = 532
 
 # Filter which arrays to plot. Set to None to plot all, or a list of array names to restrict.
-# Target arrays:    ["comb"]
+# Target arrays:    ["splot", "gbif"]
 # Predictor arrays: ["modis", "canopy_height", "soil_grids", "vodca", "worldclim"]
-TARGETS_TO_PLOT = None  # e.g. ["comb"]
+TARGETS_TO_PLOT = None  # e.g. ["splot", "gbif"]
 PREDICTORS_TO_PLOT = ["canopy_height"]  # e.g. ["modis", "canopy_height"]
-
-# Filter which target bands to plot by band name. Set to None to plot all.
-# Available bands: mean, std, median, q05, q95, count, source
-TARGET_BANDS_TO_PLOT = ["mean"]  # e.g. ["mean"]
 
 # Filter which target traits to plot by file stem. Set to None to plot all.
 TARGET_TRAITS_TO_PLOT = ["X1080", "X13"]  # e.g. ["X1080", "X13"]
@@ -23,8 +19,6 @@ TARGET_TRAITS_TO_PLOT = ["X1080", "X13"]  # e.g. ["X1080", "X13"]
 plt.rcParams["font.family"] = "monospace"
 
 z = zarr.open_group(ZARR_PATH, mode="r")
-target_band_names = z["targets"].attrs.get("band_names", [])
-n_target_bands = len(target_band_names)
 
 # Collect all (title, data) pairs for this chip
 panels = []
@@ -41,19 +35,11 @@ for group_name, group in sorted(z.groups(), key=lambda g: g[0] != "predictors"):
         data = arr[CHIP_IDX]  # (n_bands, H, W)
 
         if group_name == "targets":
+            band_names = arr.attrs.get("band_names", [])
+            n_bands_per_file = len(band_names) if band_names else 1
             for band_idx in range(data.shape[0]):
-                file_idx = band_idx // n_target_bands
-                band_pos = band_idx % n_target_bands
-                band_name = (
-                    target_band_names[band_pos]
-                    if band_pos < len(target_band_names)
-                    else str(band_pos)
-                )
-                if (
-                    TARGET_BANDS_TO_PLOT is not None
-                    and band_name not in TARGET_BANDS_TO_PLOT
-                ):
-                    continue
+                file_idx = band_idx // n_bands_per_file
+                band_pos = band_idx % n_bands_per_file
                 file_stem = (
                     Path(files[file_idx]).stem
                     if file_idx < len(files)
@@ -64,7 +50,12 @@ for group_name, group in sorted(z.groups(), key=lambda g: g[0] != "predictors"):
                     and file_stem not in TARGET_TRAITS_TO_PLOT
                 ):
                     continue
-                panels.append((f"{file_stem}\n{band_name}", data[band_idx]))
+                band_name = (
+                    band_names[band_pos]
+                    if band_pos < len(band_names)
+                    else str(band_pos)
+                )
+                panels.append((f"{arr_name}/{file_stem}\n{band_name}", data[band_idx]))
         else:
             for band_idx in range(data.shape[0]):
                 file_stem = (
