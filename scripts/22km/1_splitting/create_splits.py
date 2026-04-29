@@ -37,7 +37,9 @@ def _derive_source_tag(active_sources: list[str], legacy_source: str | None) -> 
 
 
 @hydra.main(
-    version_base=None, config_path="../../config/preprocessing", config_name="splitting"
+    version_base=None,
+    config_path="../../../config/22km/preprocessing",
+    config_name="splitting",
 )
 def main(cfg: DictConfig) -> None:  # Config
     # Target settings

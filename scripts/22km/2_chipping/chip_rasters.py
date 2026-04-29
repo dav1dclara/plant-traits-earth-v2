@@ -15,7 +15,9 @@ console = Console()
 
 
 @hydra.main(
-    version_base=None, config_path="../../config/preprocessing", config_name="chipping"
+    version_base=None,
+    config_path="../../../config/22km/preprocessing",
+    config_name="chipping",
 )
 def main(cfg: DictConfig) -> None:
     console.rule("[bold]CHIPPING DATA TO ZARR[/bold]")

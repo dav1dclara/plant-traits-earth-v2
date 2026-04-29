@@ -131,7 +131,9 @@ def _prepare_batch(
     return y_pred, bundle
 
 
-@hydra.main(config_path="../config", config_name="training/default", version_base=None)
+@hydra.main(
+    config_path="../../config/22km", config_name="training/default", version_base=None
+)
 def main(cfg: DictConfig) -> None:
     console.rule("[bold cyan]TRAINING[/bold cyan]")
 

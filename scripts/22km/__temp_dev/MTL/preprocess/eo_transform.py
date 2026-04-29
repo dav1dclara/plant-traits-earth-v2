@@ -157,7 +157,7 @@ def _process_dataset(
 
 @hydra.main(
     version_base=None,
-    config_path="../../../../config/preprocessing",
+    config_path="../../../../../config/22km/preprocessing",
     config_name="eo_transform",
 )
 def main(cfg: DictConfig) -> None:

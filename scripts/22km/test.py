@@ -182,7 +182,9 @@ def _prepare_batch(
     return y_pred, valid_x, bundle
 
 
-@hydra.main(version_base=None, config_path="../config/test", config_name="default")
+@hydra.main(
+    version_base=None, config_path="../../config/22km/test", config_name="default"
+)
 def main(cfg: DictConfig) -> None:
     console.rule("[bold cyan]TEST + FINAL PREDICTION[/bold cyan]")
 

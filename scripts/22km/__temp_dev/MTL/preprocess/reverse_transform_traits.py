@@ -121,7 +121,7 @@ def _run_source(
 
 @hydra.main(
     version_base=None,
-    config_path="../../../../config/preprocessing",
+    config_path="../../../../../config/22km/preprocessing",
     config_name="reverse_transform",
 )
 def main(cfg: DictConfig) -> None:
