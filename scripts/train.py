@@ -1,6 +1,7 @@
 import math
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import hydra
 import torch
@@ -13,7 +14,11 @@ from rich.progress import track
 from ptev2.data.dataloader import get_dataloader
 from ptev2.metrics.evaluation import summarize_single_trait_metrics
 from ptev2.utils import (
+    apply_supervision_bundle,
+    apply_supervision_tensor,
     build_target_layout,
+    mask_bundle_targets_with_validity,
+    move_bundle_to_device,
     predict_batch,
     resolve_device,
     resolve_model_cfg,
@@ -24,8 +29,8 @@ from ptev2.utils import (
 console = Console()
 
 
-def _build_loss(cfg: DictConfig, n_outputs: int):
-    """Instantiate the configured loss with model-output-aware defaults when needed."""
+def _build_loss(cfg: DictConfig):
+    """Instantiate SourceAwareLoss from config and target layout defaults."""
     loss_cfg = OmegaConf.create(OmegaConf.to_container(cfg.train.loss, resolve=False))
 
     alias_target = OmegaConf.select(loss_cfg, "target")
@@ -35,34 +40,95 @@ def _build_loss(cfg: DictConfig, n_outputs: int):
             del loss_cfg["target"]
 
     loss_target = str(OmegaConf.select(loss_cfg, "_target_") or "")
+    target_cfg = cfg.data.targets
+    if not loss_target.endswith("SourceAwareLoss"):
+        raise ValueError(
+            "Current pipeline supports only ptev2.loss.SourceAwareLoss. "
+            f"Got: {loss_target or '<missing _target_>'}"
+        )
 
-    loss_kwargs = {}
-    if loss_target.endswith("UncertaintyWeightedMTLLoss"):
-        loss_kwargs["n_traits"] = int(n_outputs)
-        for incompatible_key in ("error_type", "huber_delta"):
-            if incompatible_key in loss_cfg:
-                del loss_cfg[incompatible_key]
+    lambda_from_loss = OmegaConf.select(loss_cfg, "lambda_gbif")
+    # Backward-compatible alias for old CLI usage: w_gbif/w_splot -> lambda_gbif ratio.
+    w_gbif = OmegaConf.select(loss_cfg, "w_gbif")
+    w_splot = OmegaConf.select(loss_cfg, "w_splot")
+    lambda_from_ratio = None
+    if w_gbif is not None and w_splot is not None and float(w_splot) > 0.0:
+        lambda_from_ratio = float(w_gbif) / float(w_splot)
 
-    return instantiate(loss_cfg, **loss_kwargs)
+    return instantiate(
+        loss_cfg,
+        mode=str(OmegaConf.select(target_cfg, "mode") or "splot_only"),
+        primary_dataset=str(OmegaConf.select(target_cfg, "primary_dataset") or "splot"),
+        auxiliary_dataset=str(
+            OmegaConf.select(target_cfg, "auxiliary_dataset") or "gbif"
+        ),
+        lambda_gbif=float(
+            lambda_from_loss
+            if lambda_from_loss is not None
+            else (lambda_from_ratio if lambda_from_ratio is not None else 0.1)
+        ),
+    )
 
 
-def _loss_components(
-    loss_fn,
-    prediction: torch.Tensor,
-    target: torch.Tensor,
-    source_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return numerator/denominator for losses with or without loss_components API."""
-    if hasattr(loss_fn, "loss_components"):
-        return loss_fn.loss_components(prediction, target, source_mask)
+def _resolve_selection_value(
+    metric_name: str,
+    val_loss: float,
+    val_summary: dict[str, Any] | None,
+) -> float:
+    if metric_name == "val_loss":
+        return float(val_loss)
 
-    try:
-        scalar_loss = loss_fn(prediction, target, source_mask)
-    except TypeError:
-        scalar_loss = loss_fn(prediction, target)
+    if val_summary is None:
+        return float("nan")
 
-    denominator = scalar_loss.new_tensor(1.0)
-    return scalar_loss, denominator
+    lookup = {
+        "val_splot_macro_rmse": float(val_summary["macro_rmse"]),
+        "val_splot_macro_pearson": float(val_summary["macro_pearson_r"]),
+        "val_splot_rmse": float(val_summary["rmse"]),
+    }
+    if metric_name not in lookup:
+        raise ValueError(
+            "Unsupported train.selection.metric='{}'".format(metric_name)
+            + ". Use val_splot_macro_rmse|val_splot_macro_pearson|val_splot_rmse|val_loss."
+        )
+    return lookup[metric_name]
+
+
+def _is_better(current: float, best: float, mode: str, min_delta: float) -> bool:
+    if not math.isfinite(current):
+        return False
+    if mode == "min":
+        return current < (best - min_delta)
+    if mode == "max":
+        return current > (best + min_delta)
+    raise ValueError("train.selection.mode must be 'min' or 'max'.")
+
+
+def _prepare_batch(
+    model: torch.nn.Module,
+    X: torch.Tensor,
+    bundle: dict[str, dict[str, torch.Tensor]],
+    *,
+    device: torch.device,
+    supervision_mode: str,
+    center_crop_size: int,
+    predictor_validity_mode: str,
+    predictor_min_finite_ratio: float,
+) -> tuple[torch.Tensor, dict[str, dict[str, torch.Tensor]]]:
+    X = X.to(device, dtype=torch.float32)
+    bundle = move_bundle_to_device(bundle, device)
+
+    y_pred, valid = predict_batch(
+        model,
+        X,
+        validity_mode=predictor_validity_mode,
+        min_finite_ratio=predictor_min_finite_ratio,
+    )
+    y_pred = apply_supervision_tensor(y_pred, supervision_mode, center_crop_size)
+    valid = apply_supervision_tensor(valid, supervision_mode, center_crop_size)
+    bundle = apply_supervision_bundle(bundle, supervision_mode, center_crop_size)
+    bundle = mask_bundle_targets_with_validity(bundle, valid)
+    return y_pred, bundle
 
 
 @hydra.main(config_path="../config", config_name="training/default", version_base=None)
@@ -78,7 +144,8 @@ def main(cfg: DictConfig) -> None:
 
     console.print("[bold]\nData[/bold]")
     zarr_dir = resolve_train_zarr_dir(cfg)
-    assert zarr_dir.exists(), f"Zarr directory does not exist: {zarr_dir}"
+    if not zarr_dir.exists():
+        raise FileNotFoundError(f"Zarr directory does not exist: {zarr_dir}")
 
     console.print(f"Resolution (km): [cyan]{cfg.data.resolution_km}[/cyan]")
     console.print(f"Patch size: [cyan]{cfg.data.patch_size}[/cyan]")
@@ -104,68 +171,84 @@ def main(cfg: DictConfig) -> None:
     console.print(f"  Total: [cyan]{total_pred_bands} bands[/cyan]")
 
     console.print("\n[bold]Targets:[/bold]")
-    target_dataset, traits, bands, target_indices, source_indices = build_target_layout(
-        cfg, train_store
-    )
+    target_layout = build_target_layout(cfg, train_store)
+    traits = list(target_layout["traits"])
+    bands = list(target_layout["bands"])
+    eval_dataset = str(target_layout["eval_dataset"])
 
-    console.print(f"Dataset: [cyan]{target_dataset}[/cyan]")
+    console.print(f"Mode: [cyan]{target_layout['mode']}[/cyan]")
+    console.print(f"Train datasets: [cyan]{target_layout['active_datasets']}[/cyan]")
+    console.print(f"Eval dataset: [cyan]{eval_dataset}[/cyan]")
     console.print(f"Traits ([cyan]{len(traits)}[/cyan]):")
     for trait in traits:
         console.print(f"  - {trait}")
-    console.print(f"Bands ([cyan]{len(bands)}[/cyan]):")
-    for band in bands:
-        console.print(f"  - {band}")
 
     console.print("\n[bold]Data loaders:[/bold]")
-    batch_size = cfg.data_loaders.batch_size
-    num_workers = cfg.data_loaders.num_workers
+    batch_size = int(cfg.data_loaders.batch_size)
+    num_workers = int(cfg.data_loaders.num_workers)
 
     console.print(f"Batch size: [cyan]{batch_size}[/cyan]")
     console.print(f"Num workers: [cyan]{num_workers}[/cyan]")
+    train_fraction = float(OmegaConf.select(cfg, "data_loaders.train_fraction") or 1.0)
+    val_fraction = float(OmegaConf.select(cfg, "data_loaders.val_fraction") or 1.0)
+    subset_seed = int(
+        OmegaConf.select(cfg, "data_loaders.subset_seed") or int(cfg.train.seed)
+    )
+    console.print(f"Train fraction: [cyan]{train_fraction:.3f}[/cyan]")
+    console.print(f"Val fraction: [cyan]{val_fraction:.3f}[/cyan]")
 
     dataloader_cfg = {
         "zarr_dir": zarr_dir,
         "predictors": predictors,
-        "target": target_dataset,
-        "target_indices": target_indices,
-        "source_indices": source_indices,
+        "target_layouts": target_layout["layouts"],
+        "return_target_bundle": True,
         "batch_size": batch_size,
         "num_workers": num_workers,
+        "subset_seed": subset_seed,
     }
 
-    train_loader = get_dataloader(split="train", **dataloader_cfg)
-    val_loader = get_dataloader(split="val", **dataloader_cfg)
-
-    X_t, y_t, src_t = next(iter(train_loader))
-    X_v, y_v, src_v = next(iter(val_loader))
-
-    assert X_t.shape[1:] == X_v.shape[1:], (
-        f"X channel/spatial mismatch: train={tuple(X_t.shape[1:])} vs val={tuple(X_v.shape[1:])}"
+    train_loader = get_dataloader(
+        split="train", split_fraction=train_fraction, **dataloader_cfg
     )
-    assert y_t.shape[1:] == y_v.shape[1:], (
-        f"y channel/spatial mismatch: train={tuple(y_t.shape[1:])} vs val={tuple(y_v.shape[1:])}"
-    )
-    assert src_t.shape[1:] == src_v.shape[1:], (
-        f"source_mask channel/spatial mismatch: train={tuple(src_t.shape[1:])} vs val={tuple(src_v.shape[1:])}"
+    val_loader = get_dataloader(
+        split="val", split_fraction=val_fraction, **dataloader_cfg
     )
 
+    X_t, _ = next(iter(train_loader))
+    X_v, _ = next(iter(val_loader))
+    console.print(f"Train samples used: [cyan]{len(train_loader.dataset):,}[/cyan]")
+    console.print(f"Val samples used: [cyan]{len(val_loader.dataset):,}[/cyan]")
+    if X_t.shape[1:] != X_v.shape[1:]:
+        raise ValueError(
+            "X channel/spatial mismatch: "
+            f"train={tuple(X_t.shape[1:])} vs val={tuple(X_v.shape[1:])}"
+        )
     console.print(f"Predictor shape (C,H,W): [cyan]{tuple(X_t.shape[1:])}[/cyan]")
-    console.print(f"Target shape (C,H,W): [cyan]{tuple(y_t.shape[1:])}[/cyan]")
-    console.print(f"Source mask shape (C,H,W): [cyan]{tuple(src_t.shape[1:])}[/cyan]")
 
     model_cfg = resolve_model_cfg(cfg)
+    out_channels = len(traits) * len(bands)
 
     console.print("\n[bold]Model and training configuration[/bold]")
     model = instantiate(
-        model_cfg, in_channels=total_pred_bands, out_channels=len(target_indices)
+        model_cfg,
+        in_channels=total_pred_bands,
+        out_channels=out_channels,
     ).to(device)
+
+    init_checkpoint_path = OmegaConf.select(cfg, "train.init_checkpoint_path")
+    if init_checkpoint_path:
+        init_state = torch.load(str(init_checkpoint_path), map_location=device)
+        model_state = init_state.get("state_dict", init_state)
+        model.load_state_dict(model_state, strict=False)
+        console.print(f"Init checkpoint loaded: [cyan]{init_checkpoint_path}[/cyan]")
+
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     console.print(f"Model:         [cyan]{model_cfg._target_}[/cyan]")
     console.print(f"  In channels:  [cyan]{total_pred_bands}[/cyan]")
-    console.print(f"  Out channels: [cyan]{len(target_indices)}[/cyan]")
+    console.print(f"  Out channels: [cyan]{out_channels}[/cyan]")
     console.print(f"  Parameters:   [cyan]{n_params:,}[/cyan]")
 
-    loss_fn = _build_loss(cfg, n_outputs=len(target_indices))
+    loss_fn = _build_loss(cfg)
     if isinstance(loss_fn, torch.nn.Module):
         loss_fn = loss_fn.to(device)
 
@@ -173,22 +256,43 @@ def main(cfg: DictConfig) -> None:
     loss_params = []
     if isinstance(loss_fn, torch.nn.Module):
         loss_params = [p for p in loss_fn.parameters() if p.requires_grad]
+
     optimizer = instantiate(cfg.train.optimizer, params=model_params + loss_params)
     scheduler = instantiate(cfg.train.scheduler, optimizer=optimizer)
     grad_clip_norm = float(cfg.train.gradient_clip_norm)
-    console.print(f"Optimizer:             [cyan]{cfg.train.optimizer._target_}[/cyan]")
-    loss_name = f"{loss_fn.__class__.__module__}.{loss_fn.__class__.__name__}"
-    console.print(f"Loss:                  [cyan]{loss_name}[/cyan]")
+
+    supervision_mode = str(OmegaConf.select(cfg, "train.supervision.mode") or "dense")
+    center_crop_size = int(
+        OmegaConf.select(cfg, "train.supervision.center_crop_size") or 3
+    )
+    predictor_validity_mode = str(
+        OmegaConf.select(cfg, "train.predictor_validity.mode") or "min_fraction"
+    )
+    predictor_min_finite_ratio = float(
+        OmegaConf.select(cfg, "train.predictor_validity.min_finite_ratio") or 0.2
+    )
+    selection_metric_name = str(
+        OmegaConf.select(cfg, "train.selection.metric") or "val_splot_macro_rmse"
+    )
+    selection_mode = str(OmegaConf.select(cfg, "train.selection.mode") or "min")
+
+    console.print(f"Loss:                  [cyan]{loss_fn.__class__.__name__}[/cyan]")
     console.print(f"Scheduler:             [cyan]{cfg.train.scheduler._target_}[/cyan]")
     console.print(f"Gradient clip norm:    [cyan]{grad_clip_norm}[/cyan]")
+    console.print(
+        f"Supervision:           [cyan]{supervision_mode} (center_crop_size={center_crop_size})[/cyan]"
+    )
+    console.print(
+        "Predictor validity:    "
+        f"[cyan]{predictor_validity_mode} (min_finite_ratio={predictor_min_finite_ratio})[/cyan]"
+    )
+    console.print(
+        f"Selection metric:      [cyan]{selection_metric_name} ({selection_mode})[/cyan]"
+    )
 
     early_stopping_enabled = bool(cfg.train.early_stopping.enabled)
     early_stopping_patience = int(cfg.train.early_stopping.patience)
     early_stopping_min_delta = float(cfg.train.early_stopping.min_delta)
-    console.print(f"Early stopping enabled: [cyan]{early_stopping_enabled}[/cyan]")
-    if early_stopping_enabled:
-        console.print(f"  Patience (epochs):   [cyan]{early_stopping_patience}[/cyan]")
-        console.print(f"  Min delta:           [cyan]{early_stopping_min_delta}[/cyan]")
 
     requested_run_name = OmegaConf.select(cfg, "train.run_name")
     if requested_run_name is not None:
@@ -198,16 +302,8 @@ def main(cfg: DictConfig) -> None:
         requested_run_group = str(requested_run_group)
 
     wandb_module = None
-
     if cfg.wandb.enabled:
-        try:
-            import wandb as wandb_module
-        except Exception as exc:
-            raise RuntimeError(
-                "W&B is enabled but import failed. "
-                "Set wandb.enabled=false for debugging or fix the environment. "
-                f"Original error: {exc}"
-            ) from exc
+        import wandb as wandb_module
 
         run = wandb_module.init(
             entity=cfg.wandb.entity,
@@ -217,7 +313,7 @@ def main(cfg: DictConfig) -> None:
             config=OmegaConf.to_container(cfg, resolve=True),
             reinit=True,
         )
-        run_name = run.name
+        run_name = requested_run_name or run.name
         console.print(f"W&B logging enabled. Run: [cyan]{run_name}[/cyan]")
     else:
         run_name = requested_run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -225,42 +321,46 @@ def main(cfg: DictConfig) -> None:
 
     checkpoint_dir = Path(cfg.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    best_val_loss = float("inf")
-    best_epoch = -1
-    epochs_without_improvement = 0
     best_checkpoint_path = checkpoint_dir / f"{run_name}.pth"
     config_path = checkpoint_dir / f"{run_name}.yaml"
     OmegaConf.save(cfg, config_path)
 
-    for epoch in range(cfg.train.epochs):
+    best_selection = float("inf") if selection_mode == "min" else float("-inf")
+    best_epoch = -1
+    best_val_loss = float("inf")
+    epochs_without_improvement = 0
+
+    for epoch in range(int(cfg.train.epochs)):
         console.rule(f"Epoch {epoch + 1}/{cfg.train.epochs}")
 
         model.train()
         train_num_total = 0.0
         train_den_total = 0.0
 
-        for X, y, src in track(train_loader, description="Training"):
-            X = X.to(device, dtype=torch.float32)
-            y = y.to(device, dtype=torch.float32)
-            src = src.to(device, dtype=torch.float32)
+        for X, bundle in track(train_loader, description="Training"):
+            y_pred, bundle = _prepare_batch(
+                model,
+                X,
+                bundle,
+                device=device,
+                supervision_mode=supervision_mode,
+                center_crop_size=center_crop_size,
+                predictor_validity_mode=predictor_validity_mode,
+                predictor_min_finite_ratio=predictor_min_finite_ratio,
+            )
 
-            y_pred, valid = predict_batch(model, X)
-            y = torch.where(valid.expand_as(y), y, torch.nan)
-            y = torch.where(src > 0, y, torch.nan)
-
-            if not torch.isfinite(y).any():
+            if not torch.isfinite(y_pred).all():
                 continue
 
             optimizer.zero_grad(set_to_none=True)
-            if not torch.isfinite(y_pred).all():
-                continue
-            batch_num, batch_den = _loss_components(loss_fn, y_pred, y, src)
+            batch_num, batch_den, _ = loss_fn.loss_components(y_pred, bundle, None)
             if (
                 not torch.isfinite(batch_num)
                 or not torch.isfinite(batch_den)
                 or batch_den <= 0.0
             ):
                 continue
+
             loss = batch_num / batch_den
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
@@ -269,8 +369,7 @@ def main(cfg: DictConfig) -> None:
             train_num_total += batch_num.detach().item()
             train_den_total += batch_den.detach().item()
 
-        current_lr = optimizer.param_groups[0]["lr"]
-        scheduler.step()
+        current_lr = float(optimizer.param_groups[0]["lr"])
         train_loss_avg = (
             train_num_total / train_den_total if train_den_total > 0.0 else float("nan")
         )
@@ -281,37 +380,49 @@ def main(cfg: DictConfig) -> None:
         val_den_total = 0.0
         val_y_true_parts = []
         val_y_pred_parts = []
-        val_src_parts = []
+        val_valid_parts = []
 
         with torch.no_grad():
-            for X, y, src in track(val_loader, description="Validation"):
-                X = X.to(device, dtype=torch.float32)
-                y = y.to(device, dtype=torch.float32)
-                src = src.to(device, dtype=torch.float32)
-
-                y_pred, valid = predict_batch(model, X)
-                y = torch.where(valid.expand_as(y), y, torch.nan)
-                y = torch.where(src > 0, y, torch.nan)
-
-                if not torch.isfinite(y).any():
-                    continue
+            for X, bundle in track(val_loader, description="Validation"):
+                y_pred, bundle = _prepare_batch(
+                    model,
+                    X,
+                    bundle,
+                    device=device,
+                    supervision_mode=supervision_mode,
+                    center_crop_size=center_crop_size,
+                    predictor_validity_mode=predictor_validity_mode,
+                    predictor_min_finite_ratio=predictor_min_finite_ratio,
+                )
 
                 if not torch.isfinite(y_pred).all():
                     continue
 
-                val_y_true_parts.append(y.detach().cpu())
-                val_y_pred_parts.append(y_pred.detach().cpu())
-                val_src_parts.append(src.detach().cpu())
-
-                batch_num, batch_den = _loss_components(loss_fn, y_pred, y, src)
+                batch_num, batch_den, _ = loss_fn.loss_components(y_pred, bundle, None)
                 if (
-                    not torch.isfinite(batch_num)
-                    or not torch.isfinite(batch_den)
-                    or batch_den <= 0.0
+                    torch.isfinite(batch_num)
+                    and torch.isfinite(batch_den)
+                    and batch_den > 0.0
                 ):
+                    val_num_total += batch_num.item()
+                    val_den_total += batch_den.item()
+
+                eval_payload = bundle.get(eval_dataset)
+                if eval_payload is None:
                     continue
-                val_num_total += batch_num.item()
-                val_den_total += batch_den.item()
+
+                y_eval = eval_payload["y"]
+                src_eval = eval_payload["source_mask"]
+                valid_eval = (
+                    torch.isfinite(y_eval) & torch.isfinite(y_pred) & (src_eval > 0)
+                )
+
+                if not bool(valid_eval.any()):
+                    continue
+
+                val_y_true_parts.append(y_eval.detach().cpu())
+                val_y_pred_parts.append(y_pred.detach().cpu())
+                val_valid_parts.append(valid_eval.detach().cpu())
 
         val_loss_avg = (
             val_num_total / val_den_total if val_den_total > 0.0 else float("nan")
@@ -323,28 +434,31 @@ def main(cfg: DictConfig) -> None:
             val_metric_summary = summarize_single_trait_metrics(
                 y_true=torch.cat(val_y_true_parts, dim=0),
                 y_pred=torch.cat(val_y_pred_parts, dim=0),
-                source_mask=torch.cat(val_src_parts, dim=0),
+                source_mask=None,
+                valid_mask=torch.cat(val_valid_parts, dim=0),
                 trait_names=traits,
                 n_bands=len(bands),
             )
             console.print(
-                "  val_rmse={rmse:.6f}  val_r2={r2:.6f}  val_pearson_r={pearson_r:.6f}".format(
+                "  val_splot_rmse={rmse:.6f}  val_splot_macro_rmse={macro_rmse:.6f}  "
+                "val_splot_macro_pearson={macro_pearson_r:.6f}".format(
                     rmse=val_metric_summary["rmse"],
-                    r2=val_metric_summary["r2"],
-                    pearson_r=val_metric_summary["pearson_r"],
+                    macro_rmse=val_metric_summary["macro_rmse"],
+                    macro_pearson_r=val_metric_summary["macro_pearson_r"],
                 )
             )
 
-        val_loss_valid = math.isfinite(val_loss_avg)
-        if not val_loss_valid:
-            console.print(
-                "[yellow]val_loss is NaN — skipping checkpoint and early-stopping update.[/yellow]"
-            )
-
-        is_best = (
-            val_loss_valid and val_loss_avg < best_val_loss - early_stopping_min_delta
+        selection_value = _resolve_selection_value(
+            selection_metric_name,
+            val_loss_avg,
+            val_metric_summary,
         )
+        is_best = _is_better(
+            selection_value, best_selection, selection_mode, early_stopping_min_delta
+        )
+
         if is_best:
+            best_selection = selection_value
             best_val_loss = val_loss_avg
             best_epoch = epoch + 1
             epochs_without_improvement = 0
@@ -353,8 +467,10 @@ def main(cfg: DictConfig) -> None:
                     "epoch": best_epoch,
                     "state_dict": model.state_dict(),
                     "val_loss": best_val_loss,
+                    "selection_metric": selection_metric_name,
+                    "selection_value": best_selection,
                     "in_channels": total_pred_bands,
-                    "out_channels": len(target_indices),
+                    "out_channels": out_channels,
                     "config": OmegaConf.to_container(cfg, resolve=True),
                     "wandb_run_id": getattr(run, "id", None)
                     if cfg.wandb.enabled
@@ -363,10 +479,15 @@ def main(cfg: DictConfig) -> None:
                 best_checkpoint_path,
             )
             console.print(
-                f"[green]New best model saved[/green] (val_loss={best_val_loss:.6f})"
+                f"[green]New best model saved[/green] ({selection_metric_name}={best_selection:.6f})"
             )
-        elif val_loss_valid:
+        else:
             epochs_without_improvement += 1
+
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(selection_value)
+        else:
+            scheduler.step()
 
         if cfg.wandb.enabled:
             log_dict = {
@@ -374,13 +495,17 @@ def main(cfg: DictConfig) -> None:
                 "train/loss": train_loss_avg,
                 "val/loss": val_loss_avg,
                 "train/lr": current_lr,
+                "val/selection_metric_name": selection_metric_name,
+                "val/selection_metric_value": selection_value,
             }
             if val_metric_summary is not None:
-                log_dict["val/rmse"] = val_metric_summary["rmse"]
-                log_dict["val/r2"] = val_metric_summary["r2"]
-                log_dict["val/pearson_r"] = val_metric_summary["pearson_r"]
-            if is_best:
-                log_dict["val/loss_best"] = best_val_loss
+                log_dict["val/splot/rmse"] = val_metric_summary["rmse"]
+                log_dict["val/splot/r2"] = val_metric_summary["r2"]
+                log_dict["val/splot/pearson_r"] = val_metric_summary["pearson_r"]
+                log_dict["val/splot/macro_rmse"] = val_metric_summary["macro_rmse"]
+                log_dict["val/splot/macro_pearson_r"] = val_metric_summary[
+                    "macro_pearson_r"
+                ]
             if wandb_module is not None:
                 wandb_module.log(log_dict)
 
@@ -389,27 +514,25 @@ def main(cfg: DictConfig) -> None:
             and epochs_without_improvement >= early_stopping_patience
         ):
             console.print(
-                f"[yellow]Early stopping triggered[/yellow] (patience={early_stopping_patience}, best_epoch={best_epoch})"
+                "[yellow]Early stopping triggered[/yellow] "
+                f"(patience={early_stopping_patience}, best_epoch={best_epoch})"
             )
             break
 
     console.rule("[bold cyan]DONE[/bold cyan]")
-    console.print(f"Best val_loss={best_val_loss:.6f} at epoch {best_epoch}")
+    console.print(
+        f"Best {selection_metric_name}={best_selection:.6f} at epoch {best_epoch}"
+    )
     console.print(f"Checkpoint: [cyan]{best_checkpoint_path}[/cyan]")
 
     if cfg.wandb.enabled:
-        final_status = (
-            "ok" if math.isfinite(best_val_loss) and best_epoch > 0 else "failed"
-        )
-        run.summary["wandb_run_id"] = getattr(run, "id", None)
+        run.summary["best_selection_metric_name"] = selection_metric_name
+        run.summary["best_selection_metric_value"] = float(best_selection)
         run.summary["best_val_loss"] = (
             float(best_val_loss) if math.isfinite(best_val_loss) else None
         )
         run.summary["best_epoch"] = int(best_epoch)
         run.summary["checkpoint_path"] = str(best_checkpoint_path)
-        run.summary["status"] = final_status
-
-    if cfg.wandb.enabled:
         run.finish()
 
 

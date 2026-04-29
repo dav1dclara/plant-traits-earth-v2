@@ -9,81 +9,10 @@ import rasterio
 import rasterio.windows
 import zarr
 from rasterio.features import rasterize
-from shapely.geometry import Point
 from tqdm import tqdm
 
 BUFFER_SIZE = 512
 SPLIT_ENCODING = {"train": 0, "val": 1, "test": 2}  # -1 = unknown
-
-
-def compute_split_labels(
-    ref_tif: Path,
-    patch_size: int,
-    stride: int,
-    h3_gdf: gpd.GeoDataFrame,
-) -> np.ndarray:
-    """Assign a split label to every chip extracted from a raster.
-
-    Chips are defined by sliding a window of size `patch_size` across the raster
-    with a given `stride`. Each chip is assigned the split of the H3 cell that
-    contains its center point. Chips whose center falls outside all H3 cells are
-    labeled -1 (unknown).
-
-    Args:
-        ref_tif: Path to a reference GeoTIFF defining the raster grid (CRS,
-            transform, and dimensions). Only metadata is read, not pixel data.
-        patch_size: Side length of each chip in pixels.
-        stride: Step size between consecutive chips in pixels.
-        h3_gdf: GeoDataFrame of H3 hexagonal cells with a "split" column
-            containing split name string labels.
-
-    Returns:
-        Int8 array of shape (n_chips,) with values from SPLIT_ENCODING, or -1
-        for chips not covered by any H3 cell. Ordered row-major (left-to-right,
-        top-to-bottom).
-    """
-    # Read the raster grid metadata from the reference TIF
-    with rasterio.open(ref_tif) as src:
-        transform = src.transform
-        height, width = src.height, src.width
-
-    # Compute the number of chips along each axis
-    n_cols = math.ceil((width - patch_size) / stride) + 1
-    n_rows = math.ceil((height - patch_size) / stride) + 1
-
-    # Compute the geographic coordinates of each chip's center point.
-    # transform.c / transform.f are the top-left corner coordinates,
-    # transform.a / transform.e are the pixel width and height (e is negative).
-    xs, ys = [], []
-    for row in range(n_rows):
-        for col in range(n_cols):
-            cx = transform.c + (col * stride + patch_size / 2) * transform.a
-            cy = transform.f + (row * stride + patch_size / 2) * transform.e
-            xs.append(cx)
-            ys.append(cy)
-
-    # Spatial join: find which H3 cell each chip center falls within
-    centers = gpd.GeoDataFrame(
-        {"chip_idx": range(len(xs))},
-        geometry=[Point(x, y) for x, y in zip(xs, ys)],
-        crs=h3_gdf.crs,
-    )
-    joined = gpd.sjoin(
-        centers, h3_gdf[["split", "geometry"]], how="left", predicate="within"
-    )
-
-    # Map split names to integer codes; chips with no matching H3 cell stay -1
-    labels = np.full(len(xs), -1, dtype=np.int8)
-    matched = joined["split"].notna()
-    labels[joined.loc[matched, "chip_idx"].values] = (
-        joined.loc[matched, "split"]
-        .map(SPLIT_ENCODING)
-        .fillna(-1)
-        .astype(np.int8)
-        .values
-    )
-
-    return labels
 
 
 def compute_pixel_split_mask(ref_tif: Path, h3_gdf: gpd.GeoDataFrame) -> np.ndarray:
@@ -136,6 +65,7 @@ def _init_zarr_store(
     transform,
     raster_height: int,
     raster_width: int,
+    overwrite: bool,
 ) -> tuple[zarr.Group, dict, zarr.Array]:
     """Create and pre-allocate a zarr store for a single split.
 
@@ -160,6 +90,11 @@ def _init_zarr_store(
         Tuple of (zarr group, dict of pre-allocated arrays, bounds array).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Refusing to overwrite existing zarr store: {path}. "
+            "Set settings.overwrite=true to allow replacing existing chips."
+        )
     store = zarr.open_group(str(path), mode="w")
     store.attrs["split"] = split_name
     store.attrs["crs_epsg"] = crs.to_epsg()
@@ -211,13 +146,16 @@ def chip_rasters_to_zarr(
     h3_file: Path,
     save_all: bool = False,
     stride_all: int | None = None,
+    mask_predictors_by_split: bool = True,
+    mask_targets_by_split: bool = True,
+    overwrite: bool = False,
 ) -> None:
     """Chip predictor and target rasters into one zarr store per split.
 
     Computes a pixel-level split mask from the H3 grid, then for each split
-    slides a window of size `patch_size` with that split's stride. Every chip
-    touching the split's H3 cells is written to the split's zarr store, with
-    pixels from other splits set to NaN.
+    slides a window of size `patch_size` with that split's stride. Each chip
+    is assigned to exactly one split based on its center pixel, with pixels
+    from other splits set to NaN.
 
     Args:
         predictors: Dict mapping predictor name to list of source TIF paths.
@@ -233,6 +171,8 @@ def chip_rasters_to_zarr(
         name: [rasterio.open(f) for f in files]
         for name, files in {**predictors, **targets}.items()
     }
+    predictor_names = set(predictors.keys())
+    target_names = set(targets.keys())
     for name, srcs in all_srcs.items():
         if not srcs:
             raise ValueError(f"No files found for '{name}'. Check your data paths.")
@@ -249,11 +189,16 @@ def chip_rasters_to_zarr(
 
     for name, srcs in all_srcs.items():
         for src in srcs:
-            assert src.height == height and src.width == width, (
-                f"{name}: shape mismatch ({src.height}x{src.width} vs {height}x{width})"
-            )
-            assert src.crs == crs, f"{name}: CRS mismatch"
-            assert src.transform == transform, f"{name}: transform mismatch"
+            if src.height != height or src.width != width:
+                raise ValueError(
+                    f"{name}: shape mismatch ({src.height}x{src.width} vs {height}x{width})"
+                )
+            if src.crs != crs:
+                raise ValueError(f"{name}: CRS mismatch ({src.crs} vs {crs})")
+            if src.transform != transform:
+                raise ValueError(
+                    f"{name}: transform mismatch ({src.transform} vs {transform})"
+                )
     print("All datasets match reference grid!")
 
     print()
@@ -286,20 +231,25 @@ def chip_rasters_to_zarr(
         n_rows = math.ceil((height - patch_size) / stride) + 1
         print(f"\nStride={stride} ({', '.join(group_splits)}), grid={n_rows}×{n_cols}")
 
-        # Count chips per split in this group
+        # Count chips per split in this group (center-pixel assignment)
         named_splits = [s for s in group_splits if s != "all"]
         group_codes = {SPLIT_ENCODING[s] for s in named_splits}
         n_chips_per = {s: 0 for s in group_splits}
+        center_row = patch_size // 2
+        center_col = patch_size // 2
         for row in range(n_rows):
             for col in range(n_cols):
                 y_px, x_px = row * stride, col * stride
-                window_mask = pixel_split_mask[
-                    y_px : y_px + patch_size, x_px : x_px + patch_size
+                y_end = min(y_px + patch_size, height)
+                x_end = min(x_px + patch_size, width)
+                mask_chip = np.full((patch_size, patch_size), -1, dtype=np.int8)
+                mask_chip[: y_end - y_px, : x_end - x_px] = pixel_split_mask[
+                    y_px:y_end, x_px:x_end
                 ]
-                unique_codes = np.unique(window_mask)
-                for code in unique_codes:
-                    if code in group_codes:
-                        n_chips_per[code_to_name[code]] += 1
+                center_code = int(mask_chip[center_row, center_col])
+                if center_code in group_codes:
+                    n_chips_per[code_to_name[center_code]] += 1
+                unique_codes = np.unique(mask_chip)
                 if "all" in group_splits and any(c >= 0 for c in unique_codes):
                     n_chips_per["all"] += 1
         for s, n in n_chips_per.items():
@@ -325,6 +275,7 @@ def chip_rasters_to_zarr(
                     transform=transform,
                     raster_height=height,
                     raster_width=width,
+                    overwrite=overwrite,
                 )
             )
 
@@ -367,9 +318,10 @@ def chip_rasters_to_zarr(
 
         def _read_strip(args: tuple) -> np.ndarray:
             src, window = args
-            return src.read(window=window, boundless=True, fill_value=0).astype(
+            data = src.read(window=window, boundless=True, masked=True).astype(
                 np.float32
             )
+            return data.filled(np.nan)
 
         print("  Chipping...")
         with ThreadPoolExecutor(max_workers=min(32, n_files)) as executor:
@@ -402,12 +354,11 @@ def chip_rasters_to_zarr(
                         y_px:y_end, x_px:x_end
                     ]
 
+                    center_code = int(mask_chip[center_row, center_col])
                     unique_codes = np.unique(mask_chip)
-                    chip_splits = [
-                        s
-                        for s in group_splits
-                        if s != "all" and SPLIT_ENCODING[s] in unique_codes
-                    ]
+                    chip_splits = []
+                    if center_code in group_codes:
+                        chip_splits.append(code_to_name[center_code])
                     has_any_valid = any(c >= 0 for c in unique_codes)
                     if "all" in group_splits and has_any_valid:
                         chip_splits.append("all")
@@ -433,11 +384,18 @@ def chip_rasters_to_zarr(
                         pos = buf_pos[split_name]
                         for name in all_srcs:
                             chip = chip_data[name].copy()
-                            if split_name == "all":
-                                chip[:, mask_chip < 0] = np.nan
-                            else:
-                                split_code = SPLIT_ENCODING[split_name]
-                                chip[:, mask_chip != split_code] = np.nan
+
+                            should_mask = (
+                                name in predictor_names and mask_predictors_by_split
+                            ) or (name in target_names and mask_targets_by_split)
+
+                            if should_mask:
+                                if split_name == "all":
+                                    chip[:, mask_chip < 0] = np.nan
+                                else:
+                                    split_code = SPLIT_ENCODING[split_name]
+                                    chip[:, mask_chip != split_code] = np.nan
+
                             bufs[split_name][name][pos] = chip
                         bounds_bufs[split_name][pos] = bounds
                         buf_pos[split_name] += 1

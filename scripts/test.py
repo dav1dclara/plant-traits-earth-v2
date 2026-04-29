@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 
@@ -17,7 +18,11 @@ from torch.utils.data import DataLoader
 from ptev2.data.dataloader import PlantTraitDataset, get_dataloader
 from ptev2.metrics.evaluation import summarize_single_trait_metrics
 from ptev2.utils import (
+    apply_supervision_bundle,
+    apply_supervision_tensor,
     build_target_layout,
+    mask_bundle_targets_with_validity,
+    move_bundle_to_device,
     predict_batch,
     resolve_device,
     resolve_model_cfg,
@@ -26,6 +31,18 @@ from ptev2.utils import (
 )
 
 console = Console()
+
+
+def _to_python_scalars(obj):
+    if isinstance(obj, dict):
+        return {k: _to_python_scalars(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_python_scalars(v) for v in obj]
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    return obj
 
 
 def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
@@ -75,7 +92,7 @@ def _write_all_prediction_tif(
     pixel_w = float(geo_transform.a)
     pixel_h = float(abs(geo_transform.e))
 
-    bounds = all_store["bounds"][:]  # (N, 4): min_x, min_y, max_x, max_y
+    bounds = all_store["bounds"][:]
     n_chips, out_ch, h_out, w_out = preds.shape
 
     canvas_origin_x = geo_transform.c
@@ -137,37 +154,32 @@ def _write_all_prediction_tif(
             dst.set_band_description(b_idx, name)
 
 
-def _resolve_wandb_resume_id(
-    cfg: DictConfig,
-    train_cfg: DictConfig,
-    checkpoint_state: dict,
-    checkpoint_path: Path,
-) -> str | None:
-    checkpoint_wandb_id = checkpoint_state.get("wandb_run_id")
-    if checkpoint_wandb_id:
-        return str(checkpoint_wandb_id)
-
-    train_summary_wandb_id = OmegaConf.select(train_cfg, "wandb_run_id")
-    if train_summary_wandb_id:
-        return str(train_summary_wandb_id)
-
-    run_name = OmegaConf.select(cfg, "run_name") or checkpoint_path.stem
-    wandb_root = Path(__file__).resolve().parents[1] / "wandb"
-    if not wandb_root.exists():
-        return None
-
-    for run_dir in sorted(wandb_root.glob("run-*/"), reverse=True):
-        output_log = run_dir / "files" / "output.log"
-        if not output_log.exists():
-            continue
-        try:
-            content = output_log.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
-        if f"Run: {run_name}" in content or f"Syncing run {run_name}" in content:
-            return run_dir.name.split("-")[-1]
-
-    return None
+def _prepare_batch(
+    model: torch.nn.Module,
+    X: torch.Tensor,
+    bundle: dict[str, dict[str, torch.Tensor]] | None,
+    *,
+    device: torch.device,
+    supervision_mode: str,
+    center_crop_size: int,
+    predictor_validity_mode: str,
+    predictor_min_finite_ratio: float,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, dict[str, torch.Tensor]] | None]:
+    X = X.to(device=device, dtype=torch.float32)
+    if bundle is not None:
+        bundle = move_bundle_to_device(bundle, device)
+    y_pred, valid_x = predict_batch(
+        model,
+        X,
+        validity_mode=predictor_validity_mode,
+        min_finite_ratio=predictor_min_finite_ratio,
+    )
+    y_pred = apply_supervision_tensor(y_pred, supervision_mode, center_crop_size)
+    valid_x = apply_supervision_tensor(valid_x, supervision_mode, center_crop_size)
+    if bundle is not None:
+        bundle = apply_supervision_bundle(bundle, supervision_mode, center_crop_size)
+        bundle = mask_bundle_targets_with_validity(bundle, valid_x)
+    return y_pred, valid_x, bundle
 
 
 @hydra.main(version_base=None, config_path="../config/test", config_name="default")
@@ -190,9 +202,10 @@ def main(cfg: DictConfig) -> None:
 
     zarr_dir = resolve_train_zarr_dir(train_cfg)
     train_store = zarr.open_group(str(zarr_dir / "train.zarr"), mode="r")
+    target_layout = build_target_layout(train_cfg, train_store)
 
-    target_dataset, traits, selected_bands, target_indices, source_indices = (
-        build_target_layout(train_cfg, train_store)
+    eval_dataset = str(
+        OmegaConf.select(cfg, "eval_dataset") or target_layout["eval_dataset"]
     )
 
     test_split = str(OmegaConf.select(cfg, "test_split") or "test")
@@ -200,9 +213,8 @@ def main(cfg: DictConfig) -> None:
         zarr_dir=zarr_dir,
         split=test_split,
         predictors=predictors,
-        target=target_dataset,
-        target_indices=target_indices,
-        source_indices=source_indices,
+        target_layouts=target_layout["layouts"],
+        return_target_bundle=True,
         batch_size=int(train_cfg.data_loaders.batch_size),
         num_workers=int(train_cfg.data_loaders.num_workers),
     )
@@ -215,54 +227,87 @@ def main(cfg: DictConfig) -> None:
     total_pred_bands = sum(
         train_store[f"predictors/{name}"].shape[1] for name in predictors
     )
+    traits = list(target_layout["traits"])
+    bands = list(target_layout["bands"])
+    out_channels = len(traits) * len(bands)
+
     model = instantiate(
         model_cfg,
         in_channels=total_pred_bands,
-        out_channels=len(target_indices),
+        out_channels=out_channels,
     ).to(device)
     model.load_state_dict(checkpoint_state)
     model.eval()
 
+    supervision_mode = str(
+        OmegaConf.select(train_cfg, "train.supervision.mode") or "dense"
+    )
+    center_crop_size = int(
+        OmegaConf.select(train_cfg, "train.supervision.center_crop_size") or 3
+    )
+    predictor_validity_mode = str(
+        OmegaConf.select(train_cfg, "train.predictor_validity.mode") or "min_fraction"
+    )
+    predictor_min_finite_ratio = float(
+        OmegaConf.select(train_cfg, "train.predictor_validity.min_finite_ratio") or 0.2
+    )
+
     all_y_true: list[np.ndarray] = []
     all_y_pred: list[np.ndarray] = []
-    all_src: list[np.ndarray] = []
+    all_valid: list[np.ndarray] = []
     skipped_batches = 0
 
     with torch.no_grad():
-        for X, y, src in track(
+        for X, bundle in track(
             test_loader, description=f"Test [{checkpoint_path.stem}]"
         ):
-            X = X.to(device=device, dtype=torch.float32)
-            y = y.to(device=device, dtype=torch.float32)
-            src = src.to(device=device, dtype=torch.float32)
+            y_pred, _, bundle = _prepare_batch(
+                model,
+                X,
+                bundle,
+                device=device,
+                supervision_mode=supervision_mode,
+                center_crop_size=center_crop_size,
+                predictor_validity_mode=predictor_validity_mode,
+                predictor_min_finite_ratio=predictor_min_finite_ratio,
+            )
+            if bundle is None:
+                skipped_batches += 1
+                continue
 
-            y_pred, valid_x = predict_batch(model, X)
-            y = torch.where(valid_x.expand_as(y), y, torch.nan)
-            splot_mask = src == 2
-            y = torch.where(splot_mask, y, torch.nan)
+            eval_payload = bundle.get(eval_dataset)
+            if eval_payload is None:
+                skipped_batches += 1
+                continue
 
-            valid = torch.isfinite(y_pred) & torch.isfinite(y) & splot_mask
-            if not bool(valid.any()):
+            y_eval = eval_payload["y"]
+            src_eval = eval_payload["source_mask"]
+            valid_eval = (
+                torch.isfinite(y_eval) & torch.isfinite(y_pred) & (src_eval > 0)
+            )
+
+            if not bool(valid_eval.any()):
                 skipped_batches += 1
                 continue
 
             all_y_pred.append(y_pred.detach().cpu().numpy())
-            all_y_true.append(y.detach().cpu().numpy())
-            all_src.append(src.detach().cpu().numpy())
+            all_y_true.append(y_eval.detach().cpu().numpy())
+            all_valid.append(valid_eval.detach().cpu().numpy())
 
     if not all_y_true:
         raise RuntimeError("No valid test observations found.")
 
     y_true = np.concatenate(all_y_true, axis=0)
     y_pred = np.concatenate(all_y_pred, axis=0)
-    source_mask = np.concatenate(all_src, axis=0)
+    valid_mask = np.concatenate(all_valid, axis=0)
 
     metric_summary = summarize_single_trait_metrics(
         y_true=y_true,
         y_pred=y_pred,
-        source_mask=source_mask,
+        source_mask=None,
+        valid_mask=valid_mask,
         trait_names=traits,
-        n_bands=len(selected_bands),
+        n_bands=len(bands),
     )
 
     output_dir = Path(str(cfg.output_dir))
@@ -272,6 +317,9 @@ def main(cfg: DictConfig) -> None:
     compact_metrics = {
         "checkpoint": str(checkpoint_path),
         "split": test_split,
+        "mode": str(target_layout["mode"]),
+        "target_mode": str(target_layout["mode"]),
+        "eval_dataset": eval_dataset,
         "n_valid": int(metric_summary["n_valid"]),
         "skipped_batches": int(skipped_batches),
         "rmse": float(metric_summary["rmse"]),
@@ -286,158 +334,122 @@ def main(cfg: DictConfig) -> None:
 
     compact_path = output_dir / f"{stem}.test_metrics_compact.json"
     compact_path.write_text(json.dumps(compact_metrics, indent=2), encoding="utf-8")
+    full_metrics = {
+        **compact_metrics,
+        "trait_metrics": _to_python_scalars(metric_summary["trait_metrics"]),
+    }
+    full_path = output_dir / f"{stem}.test_metrics_full.json"
+    full_path.write_text(json.dumps(full_metrics, indent=2), encoding="utf-8")
 
-    if bool(cfg.save_full_trait_metrics):
-        full_path = output_dir / f"{stem}.test_metrics_full.json"
-        full_path.write_text(json.dumps(metric_summary, indent=2), encoding="utf-8")
-
-    if bool(cfg.save_arrays):
-        np.save(output_dir / f"{stem}.test_preds.npy", y_pred)
-        np.save(output_dir / f"{stem}.test_targets.npy", y_true)
-        np.save(output_dir / f"{stem}.test_source_mask.npy", source_mask)
-
-    # Final full-domain prediction (all.zarr -> GeoTIFF)
-    all_zarr_path = zarr_dir / "all.zarr"
-    if not all_zarr_path.exists():
-        raise FileNotFoundError(f"all.zarr not found: {all_zarr_path}")
-    all_store = zarr.open_group(str(all_zarr_path), mode="r")
-    all_dataset = PlantTraitDataset(
-        all_zarr_path,
-        predictors=predictors,
-        target=target_dataset,
-        target_indices=target_indices,
-        source_indices=source_indices,
-    )
-    all_loader = DataLoader(
-        all_dataset,
-        batch_size=int(train_cfg.data_loaders.batch_size),
-        shuffle=False,
-        num_workers=int(train_cfg.data_loaders.num_workers),
-    )
-
-    all_preds: list[np.ndarray] = []
-    with torch.no_grad():
-        for X, _, _ in track(
-            all_loader, description=f"All-map [{checkpoint_path.stem}]"
-        ):
-            X = X.to(device=device, dtype=torch.float32)
-            y_pred_map, valid_x = predict_batch(model, X)
-            y_pred_map = torch.where(
-                valid_x.expand_as(y_pred_map),
-                y_pred_map,
-                torch.full_like(y_pred_map, float("nan")),
+    diagnostics_dir = Path(str(OmegaConf.select(cfg, "diagnostics_dir") or output_dir))
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    per_trait_csv = diagnostics_dir / "per_trait_test_metrics.csv"
+    if not per_trait_csv.exists():
+        with per_trait_csv.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "run_name",
+                    "split",
+                    "mode",
+                    "eval_dataset",
+                    "trait",
+                    "n_valid",
+                    "rmse",
+                    "r2",
+                    "pearson_r",
+                    "mae",
+                ]
             )
-            all_preds.append(y_pred_map.detach().cpu().numpy())
+    with per_trait_csv.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        for trait_name, metrics in metric_summary["trait_metrics"].items():
+            writer.writerow(
+                [
+                    stem,
+                    test_split,
+                    str(target_layout["mode"]),
+                    eval_dataset,
+                    trait_name,
+                    metrics["n_valid"],
+                    metrics["rmse"],
+                    metrics["r2"],
+                    metrics["pearson_r"],
+                    metrics["mae"],
+                ]
+            )
 
-    preds_all = np.concatenate(all_preds, axis=0)
-    prediction_out_dir = Path(
-        str(OmegaConf.select(cfg, "prediction_out_dir") or output_dir)
-    )
-    prediction_filename = str(
-        OmegaConf.select(cfg, "prediction_tif_name") or f"{stem}.tif"
-    )
-    out_tif_path = prediction_out_dir / prediction_filename
-    band_names = [f"{trait}_{band}" for trait in traits for band in selected_bands]
-    _write_all_prediction_tif(preds_all, all_store, out_tif_path, band_names)
+    out_tif_path = None
+    write_all_map_cfg = OmegaConf.select(cfg, "write_all_map")
+    write_all_map = True if write_all_map_cfg is None else bool(write_all_map_cfg)
+    if write_all_map:
+        all_zarr_path = zarr_dir / "all.zarr"
+        if not all_zarr_path.exists():
+            raise FileNotFoundError(f"all.zarr not found: {all_zarr_path}")
+        all_store = zarr.open_group(str(all_zarr_path), mode="r")
+
+        all_dataset = PlantTraitDataset(
+            all_zarr_path,
+            predictors=predictors,
+            target_layouts=target_layout["layouts"],
+            return_target_bundle=True,
+        )
+        all_loader = DataLoader(
+            all_dataset,
+            batch_size=int(train_cfg.data_loaders.batch_size),
+            shuffle=False,
+            num_workers=int(train_cfg.data_loaders.num_workers),
+        )
+
+        all_preds: list[np.ndarray] = []
+        with torch.no_grad():
+            for X, _ in track(
+                all_loader, description=f"All-map [{checkpoint_path.stem}]"
+            ):
+                y_pred_map, valid_x, _ = _prepare_batch(
+                    model,
+                    X,
+                    None,
+                    device=device,
+                    supervision_mode=supervision_mode,
+                    center_crop_size=center_crop_size,
+                    predictor_validity_mode=predictor_validity_mode,
+                    predictor_min_finite_ratio=predictor_min_finite_ratio,
+                )
+                y_pred_map = torch.where(
+                    valid_x.expand_as(y_pred_map),
+                    y_pred_map,
+                    torch.full_like(y_pred_map, float("nan")),
+                )
+                all_preds.append(y_pred_map.detach().cpu().numpy())
+
+        preds_all = np.concatenate(all_preds, axis=0)
+        prediction_out_dir = Path(
+            str(OmegaConf.select(cfg, "prediction_out_dir") or output_dir)
+        )
+        prediction_filename = str(
+            OmegaConf.select(cfg, "prediction_tif_name") or f"{stem}.tif"
+        )
+        out_tif_path = prediction_out_dir / prediction_filename
+        band_names = [f"{trait}_{band}" for trait in traits for band in bands]
+        _write_all_prediction_tif(preds_all, all_store, out_tif_path, band_names)
 
     console.print(f"checkpoint: [cyan]{checkpoint_path}[/cyan]")
     console.print(f"split:      [cyan]{test_split}[/cyan]")
+    console.print(f"mode:       [cyan]{target_layout['mode']}[/cyan]")
+    console.print(f"eval_data:  [cyan]{eval_dataset}[/cyan]")
     console.print(f"n_valid:    [cyan]{compact_metrics['n_valid']}[/cyan]")
     console.print(f"macro_rmse: [cyan]{compact_metrics['macro_rmse']:.6f}[/cyan]")
     console.print(f"macro_r2:   [cyan]{compact_metrics['macro_r2']:.6f}[/cyan]")
     console.print(f"macro_r:    [cyan]{compact_metrics['macro_pearson_r']:.6f}[/cyan]")
     console.print(f"macro_mae:  [cyan]{compact_metrics['macro_mae']:.6f}[/cyan]")
     console.print(f"metrics:    [cyan]{compact_path}[/cyan]")
-    console.print(f"all-map tif:[cyan]{out_tif_path}[/cyan]")
-
-    wandb_enabled_cfg = OmegaConf.select(cfg, "wandb.enabled")
-    wandb_enabled_train = OmegaConf.select(train_cfg, "wandb.enabled")
-    wandb_enabled = bool(
-        wandb_enabled_cfg
-        if wandb_enabled_cfg is not None
-        else (wandb_enabled_train if wandb_enabled_train is not None else False)
-    )
-
-    if wandb_enabled:
-        import wandb
-
-        wandb_project = OmegaConf.select(cfg, "wandb.project") or OmegaConf.select(
-            train_cfg, "wandb.project"
-        )
-        wandb_entity = OmegaConf.select(cfg, "wandb.entity") or OmegaConf.select(
-            train_cfg, "wandb.entity"
-        )
-        if not wandb_project or not wandb_entity:
-            console.print("[yellow]W&B skipped: missing entity/project.[/yellow]")
-            return
-
-        run_name = OmegaConf.select(cfg, "run_name") or checkpoint_path.stem
-        resume_id = _resolve_wandb_resume_id(cfg, train_cfg, state, checkpoint_path)
-
-        if resume_id:
-            console.print(
-                f"[cyan]Appending test metrics to W&B run id={resume_id}[/cyan]"
-            )
-            run = wandb.init(
-                project=str(wandb_project),
-                entity=str(wandb_entity),
-                id=str(resume_id),
-                resume="allow",
-                job_type="test",
-                config={
-                    "checkpoint": str(checkpoint_path),
-                    "test_split": test_split,
-                    "output_dir": str(output_dir),
-                },
-                reinit="finish_previous",
-            )
-        else:
-            console.print(
-                "[yellow]Could not resolve matching W&B run; creating a new test run.[/yellow]"
-            )
-            run = wandb.init(
-                project=str(wandb_project),
-                entity=str(wandb_entity),
-                name=str(run_name),
-                job_type="test",
-                config={
-                    "checkpoint": str(checkpoint_path),
-                    "test_split": test_split,
-                    "output_dir": str(output_dir),
-                },
-                reinit="finish_previous",
-            )
-
-        log_dict = {
-            "test/macro/rmse": compact_metrics["macro_rmse"],
-            "test/macro/r2": compact_metrics["macro_r2"],
-            "test/macro/pearson_r": compact_metrics["macro_pearson_r"],
-            "test/macro/mae": compact_metrics["macro_mae"],
-            "test/global/rmse": compact_metrics["rmse"],
-            "test/global/r2": compact_metrics["r2"],
-            "test/global/pearson_r": compact_metrics["pearson_r"],
-            "test/global/mae": compact_metrics["mae"],
-            "test/n_valid": compact_metrics["n_valid"],
-            "test/skipped_batches": compact_metrics["skipped_batches"],
-        }
-        wandb.log(log_dict)
-
-        if bool(OmegaConf.select(cfg, "wandb.log_trait_metrics")):
-            trait_metrics = metric_summary.get("trait_metrics", {})
-            for trait_name, trait_result in trait_metrics.items():
-                wandb.log(
-                    {
-                        f"test/trait/{trait_name}/rmse": trait_result["rmse"],
-                        f"test/trait/{trait_name}/r2": trait_result["r2"],
-                        f"test/trait/{trait_name}/pearson_r": trait_result["pearson_r"],
-                        f"test/trait/{trait_name}/mae": trait_result["mae"],
-                    }
-                )
-
-        run.summary["checkpoint"] = str(checkpoint_path)
-        run.summary["test_metrics_compact"] = str(compact_path)
-        run.summary["all_prediction_tif"] = str(out_tif_path)
-        run.finish()
+    console.print(f"metrics full:[cyan]{full_path}[/cyan]")
+    console.print(f"per-trait:  [cyan]{per_trait_csv}[/cyan]")
+    if out_tif_path is not None:
+        console.print(f"all-map tif:[cyan]{out_tif_path}[/cyan]")
+    else:
+        console.print("all-map tif:[yellow]skipped (write_all_map=false)[/yellow]")
 
 
 if __name__ == "__main__":
