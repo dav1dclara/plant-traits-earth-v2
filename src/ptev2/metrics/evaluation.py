@@ -18,7 +18,8 @@ def _to_numpy(x: Any) -> np.ndarray:
 def _validate_shapes(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    source_mask: np.ndarray,
+    source_mask: np.ndarray | None,
+    valid_mask: np.ndarray | None,
     n_traits: int,
     n_bands: int,
 ) -> None:
@@ -33,21 +34,28 @@ def _validate_shapes(
         raise ValueError(
             f"Expected {expected_channels} target channels for {n_traits} traits x {n_bands} bands, got {y_true.shape[1]}."
         )
-    if source_mask.ndim != 4:
-        raise ValueError(
-            f"Expected source_mask shaped (N, T, H, W), got {source_mask.shape}."
-        )
-    if (
-        source_mask.shape[0] != y_true.shape[0]
-        or source_mask.shape[2:] != y_true.shape[2:]
-    ):
-        raise ValueError(
-            "source_mask must match batch and spatial dimensions of y_true/y_pred."
-        )
-    if source_mask.shape[1] != n_traits:
-        raise ValueError(
-            f"source_mask has {source_mask.shape[1]} trait channels, but {n_traits} traits were requested."
-        )
+    if source_mask is not None:
+        if source_mask.ndim != 4:
+            raise ValueError(
+                f"Expected source_mask shaped (N, T, H, W), got {source_mask.shape}."
+            )
+        if (
+            source_mask.shape[0] != y_true.shape[0]
+            or source_mask.shape[2:] != y_true.shape[2:]
+        ):
+            raise ValueError(
+                "source_mask must match batch and spatial dimensions of y_true/y_pred."
+            )
+        if source_mask.shape[1] not in {n_traits, y_true.shape[1]}:
+            raise ValueError(
+                "source_mask channel dimension must be either n_traits or full target channels. "
+                f"Got {source_mask.shape[1]} with n_traits={n_traits} and C={y_true.shape[1]}."
+            )
+    if valid_mask is not None:
+        if valid_mask.shape != y_true.shape:
+            raise ValueError(
+                f"valid_mask must match y_true/y_pred shape {y_true.shape}, got {valid_mask.shape}."
+            )
 
 
 def _finite_mean(values: Sequence[float]) -> float:
@@ -60,24 +68,38 @@ def _finite_mean(values: Sequence[float]) -> float:
 def summarize_single_trait_metrics(
     y_true: Any,
     y_pred: Any,
-    source_mask: Any,
+    source_mask: Any | None,
     trait_names: Sequence[str],
     n_bands: int,
     valid_source_value: int | float = 2,
+    valid_mask: Any | None = None,
 ) -> dict[str, Any]:
     y_true_np = _to_numpy(y_true)
     y_pred_np = _to_numpy(y_pred)
-    source_mask_np = _to_numpy(source_mask)
+    source_mask_np = _to_numpy(source_mask) if source_mask is not None else None
+    valid_mask_np = (
+        _to_numpy(valid_mask).astype(bool) if valid_mask is not None else None
+    )
 
     n_traits = len(trait_names)
-    _validate_shapes(y_true_np, y_pred_np, source_mask_np, n_traits, n_bands)
-
-    source_mask_expanded = np.repeat(source_mask_np, n_bands, axis=1)
-    global_valid = (
-        np.isfinite(y_true_np)
-        & np.isfinite(y_pred_np)
-        & (source_mask_expanded == valid_source_value)
+    _validate_shapes(
+        y_true_np, y_pred_np, source_mask_np, valid_mask_np, n_traits, n_bands
     )
+
+    if valid_mask_np is not None:
+        global_valid = np.isfinite(y_true_np) & np.isfinite(y_pred_np) & valid_mask_np
+    elif source_mask_np is not None:
+        if source_mask_np.shape[1] == y_true_np.shape[1]:
+            source_mask_expanded = source_mask_np
+        else:
+            source_mask_expanded = np.repeat(source_mask_np, n_bands, axis=1)
+        global_valid = (
+            np.isfinite(y_true_np)
+            & np.isfinite(y_pred_np)
+            & (source_mask_expanded == valid_source_value)
+        )
+    else:
+        global_valid = np.isfinite(y_true_np) & np.isfinite(y_pred_np)
 
     global_y_true = y_true_np[global_valid]
     global_y_pred = y_pred_np[global_valid]
@@ -102,13 +124,23 @@ def summarize_single_trait_metrics(
 
         y_true_trait = y_true_np[:, start:stop]
         y_pred_trait = y_pred_np[:, start:stop]
-        source_trait = source_mask_np[:, trait_idx : trait_idx + 1]
-
-        valid_trait = (
-            np.isfinite(y_true_trait)
-            & np.isfinite(y_pred_trait)
-            & (source_trait == valid_source_value)
-        )
+        if valid_mask_np is not None:
+            valid_trait_mask = valid_mask_np[:, start:stop]
+            valid_trait = (
+                np.isfinite(y_true_trait) & np.isfinite(y_pred_trait) & valid_trait_mask
+            )
+        elif source_mask_np is not None:
+            if source_mask_np.shape[1] == y_true_np.shape[1]:
+                source_trait = source_mask_np[:, start:stop]
+            else:
+                source_trait = source_mask_np[:, trait_idx : trait_idx + 1]
+            valid_trait = (
+                np.isfinite(y_true_trait)
+                & np.isfinite(y_pred_trait)
+                & (source_trait == valid_source_value)
+            )
+        else:
+            valid_trait = np.isfinite(y_true_trait) & np.isfinite(y_pred_trait)
         if np.any(valid_trait):
             yt_trait = y_true_trait[valid_trait]
             yp_trait = y_pred_trait[valid_trait]

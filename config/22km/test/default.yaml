@@ -1,0 +1,10 @@
+run_name: null
+checkpoint_path: null
+checkpoint_dir: /scratch3/plant-traits-v2/checkpoints/
+output_dir: /scratch3/plant-traits-v2/test_outputs/
+prediction_out_dir: /scratch3/plant-traits-v2/predictions/
+prediction_tif_name: null
+test_split: test
+eval_dataset: splot
+diagnostics_dir: /scratch3/plant-traits-v2/outputs/diagnostics
+write_all_map: false

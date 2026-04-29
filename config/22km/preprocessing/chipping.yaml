@@ -1,0 +1,40 @@
+paths:
+  predictors_dir: /scratch3/plant-traits-v2/data/22km/eo_data_processed/
+  targets_dir: /scratch3/plant-traits-v2/data/22km/targets/
+  splits_file: /scratch3/plant-traits-v2/data/22km/splits/h3_splits_res1_comb_22km.gpkg
+  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips_luca/
+
+settings:
+  patch_size: 7
+  stride: 3
+  save_all: true
+  overwrite: false
+
+data:
+  predictors:
+    canopy_height:
+      use: true
+      bands: []
+    modis:
+      use: true
+      bands: []
+    soil_grids:
+      use: true
+      bands: []
+    vodca:
+      use: true
+      bands: []
+    worldclim:
+      use: true
+      bands: []
+
+  targets:
+    comb:
+      use: false
+      traits: []
+    splot:
+      use: true
+      traits: []
+    gbif:
+      use: true
+      traits: []

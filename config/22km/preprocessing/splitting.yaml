@@ -1,0 +1,20 @@
+data_dir: "/scratch3/plant-traits-v2/data/"
+
+targets:
+  resolution_km: "22"
+  source: "comb"  # "comb" means union of splot+gbif; optional `sources` can override
+  sources: [splot, gbif]
+
+h3:
+  resolution: 1
+
+splitting:
+  train_frac: 0.7
+  val_frac: 0.2
+  test_frac: 0.1
+
+jsd:
+  bands: [1]  # mean only; robust for sources with single-band targets
+  n_restarts: 3000
+  n_bins: 50
+  random_seed: 11

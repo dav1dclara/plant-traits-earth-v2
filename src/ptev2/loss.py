@@ -1,160 +1,36 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class MSELoss(nn.Module):
-    """Configurable MSE loss for Hydra instantiation."""
+class SourceAwareLoss(nn.Module):
+    """Source-aware regression loss for the active pipeline modes.
 
-    def __init__(self, reduction: str = "mean") -> None:
-        super().__init__()
-        self.reduction = reduction
-
-    def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return F.mse_loss(prediction, target, reduction=self.reduction)
-
-
-class MaskedMSELoss(nn.Module):
-    """MSE over finite values only (ignores NaN/Inf in prediction/target)."""
-
-    def __init__(self, reduction: str = "mean") -> None:
-        super().__init__()
-        self.reduction = reduction
-
-    def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        valid = torch.isfinite(prediction) & torch.isfinite(target)
-        if not bool(valid.any()):
-            return prediction.sum() * 0.0
-        return F.mse_loss(
-            prediction[valid],
-            target[valid],
-            reduction=self.reduction,
-        )
-
-
-def per_trait_masked_loss(
-    prediction: torch.Tensor,
-    target: torch.Tensor,
-    source_mask: torch.Tensor,
-    w_gbif: float = 1.0,
-    w_splot: float = 2.0,
-    reduction: str = "mean",
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """Compute a per-output masked regression loss over dense maps."""
-    if prediction.shape != target.shape or source_mask.shape != target.shape:
-        raise ValueError(
-            "prediction, target, and source_mask must have identical shapes, got "
-            f"{prediction.shape}, {target.shape}, and {source_mask.shape}"
-        )
-
-    if prediction.ndim == 4:
-        batch_size, n_outputs, height, width = prediction.shape
-        prediction = prediction.permute(0, 2, 3, 1).reshape(-1, n_outputs)
-        target = target.permute(0, 2, 3, 1).reshape(-1, n_outputs)
-        source_mask = source_mask.permute(0, 2, 3, 1).reshape(-1, n_outputs)
-
-    weights = torch.zeros_like(target, dtype=prediction.dtype)
-    weights = torch.where(source_mask == 1, torch.full_like(weights, w_gbif), weights)
-    weights = torch.where(source_mask == 2, torch.full_like(weights, w_splot), weights)
-
-    valid = torch.isfinite(prediction) & torch.isfinite(target) & (weights > 0)
-    valid_f = valid.to(dtype=prediction.dtype)
-
-    pred_safe = torch.where(valid, prediction, torch.zeros_like(prediction))
-    target_safe = torch.where(valid, target, torch.zeros_like(target))
-    squared_error = (pred_safe - target_safe).pow(2)
-
-    if reduction == "mean":
-        numerator = (squared_error * weights).sum(dim=0)
-        denominator = (weights * valid_f).sum(dim=0).clamp_min(eps)
-        trait_losses = numerator / denominator
-    elif reduction == "sum":
-        trait_losses = (squared_error * weights * valid_f).sum(dim=0)
-    else:
-        raise ValueError(f"Unsupported reduction: {reduction}")
-
-    no_valid = valid_f.sum(dim=0) == 0
-    if bool(no_valid.any()):
-        trait_losses = trait_losses.clone()
-        trait_losses[no_valid] = float("nan")
-
-    return trait_losses
-
-
-class UncertaintyWeightedMTLLoss(nn.Module):
-    """Per-output uncertainty-weighted dense regression loss for MTL/MMoE runs."""
+    Supported modes:
+    - splot_only
+    - source_aware_comb_single_head
+    """
 
     def __init__(
         self,
-        n_traits: int = 37,
-        w_gbif: float = 1.0,
-        w_splot: float = 2.0,
-        init_log_sigma_sq: float = 0.0,
-    ) -> None:
-        super().__init__()
-        self.log_sigma_sq = nn.Parameter(
-            torch.full((n_traits,), float(init_log_sigma_sq), dtype=torch.float32)
-        )
-        self.w_gbif = float(w_gbif)
-        self.w_splot = float(w_splot)
-
-    def loss_components(
-        self,
-        prediction: torch.Tensor,
-        target: torch.Tensor,
-        source_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        trait_losses = per_trait_masked_loss(
-            prediction,
-            target,
-            source_mask,
-            w_gbif=self.w_gbif,
-            w_splot=self.w_splot,
-            reduction="mean",
-        )
-
-        valid = torch.isfinite(trait_losses)
-        if not bool(valid.any()):
-            zero = prediction.sum() * 0.0
-            return zero, zero
-
-        trait_losses = torch.nan_to_num(trait_losses, nan=0.0)
-        weighted = (
-            torch.exp(-self.log_sigma_sq[valid]) * trait_losses[valid]
-            + self.log_sigma_sq[valid]
-        )
-        numerator = weighted.sum()
-        denominator = valid.sum().to(dtype=prediction.dtype)
-        return numerator, denominator
-
-    def forward(
-        self,
-        prediction: torch.Tensor,
-        target: torch.Tensor,
-        source_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        numerator, denominator = self.loss_components(prediction, target, source_mask)
-        if not bool((denominator > 0).item()):
-            return prediction.sum() * 0.0
-        return numerator / denominator
-
-
-class WeightedMaskedDenseLoss(nn.Module):
-    """Weighted masked dense regression loss for tensors shaped (B, C, H, W)."""
-
-    def __init__(
-        self,
-        error_type: str = "mse",
+        mode: str = "splot_only",
+        primary_dataset: str = "splot",
+        auxiliary_dataset: str = "gbif",
+        lambda_gbif: float = 0.1,
+        error_type: str = "smooth_l1",
         huber_delta: float = 1.0,
-        w_gbif: float = 1.0,
-        w_splot: float = 2.0,
+        eps: float = 1e-8,
     ) -> None:
         super().__init__()
+        self.mode = str(mode)
+        self.primary_dataset = str(primary_dataset)
+        self.auxiliary_dataset = str(auxiliary_dataset)
+        self.lambda_gbif = float(lambda_gbif)
         self.error_type = str(error_type).lower()
         self.huber_delta = float(huber_delta)
-        self.w_gbif = float(w_gbif)
-        self.w_splot = float(w_splot)
+        self.eps = float(eps)
 
     def _error_map(
         self, prediction: torch.Tensor, target: torch.Tensor
@@ -169,69 +45,132 @@ class WeightedMaskedDenseLoss(nn.Module):
                 beta=self.huber_delta,
             )
         raise ValueError(
-            "Unsupported error_type for WeightedMaskedDenseLoss: "
-            f"{self.error_type}. Use one of ['mse', 'smooth_l1', 'huber']."
+            f"Unsupported error_type '{self.error_type}'. Use mse|smooth_l1|huber."
         )
 
-    def loss_components(
+    def _dataset_components(
         self,
         prediction: torch.Tensor,
         target: torch.Tensor,
-        source_mask: torch.Tensor,
-        sample_weight: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if prediction.shape != target.shape:
             raise ValueError(
                 f"prediction and target shapes must match, got {prediction.shape} vs {target.shape}"
             )
-        if source_mask.shape != target.shape:
-            raise ValueError(
-                "source_mask and target shapes must match, got "
-                f"{source_mask.shape} vs {target.shape}"
-            )
-        source_mask_i = source_mask.to(torch.int64)
-        valid = (
-            torch.isfinite(prediction) & torch.isfinite(target) & (source_mask_i > 0)
-        )
+        if prediction.ndim != 4:
+            raise ValueError(f"Expected dense maps (B,C,H,W), got {prediction.shape}.")
 
-        weights = torch.zeros_like(target, dtype=prediction.dtype)
-        weights = torch.where(
-            source_mask_i == 1,
-            torch.full_like(weights, self.w_gbif),
-            weights,
-        )
-        weights = torch.where(
-            source_mask_i == 2,
-            torch.full_like(weights, self.w_splot),
-            weights,
-        )
-
-        weighted_valid = valid.to(dtype=prediction.dtype) * weights
-        # Idea 3: optional per-position quality weight (e.g. splot_count / splot_std).
-        # Multiplies both numerator and denominator, so it re-weights the contribution
-        # of each chip/trait relative to the batch average.
-        if sample_weight is not None:
-            weighted_valid = weighted_valid * sample_weight
-        denominator = weighted_valid.sum()
-        if not bool((denominator > 0).item()):
-            zero = prediction.sum() * 0.0
-            return zero, denominator
-
-        # Important: avoid propagating NaN gradients from invalid target locations.
-        # We sanitize both tensors before error computation and re-apply the valid mask.
+        valid = torch.isfinite(prediction) & torch.isfinite(target)
         pred_safe = torch.where(valid, prediction, torch.zeros_like(prediction))
         target_safe = torch.where(valid, target, torch.zeros_like(target))
-        error_map = self._error_map(pred_safe, target_safe)
-        numerator = (error_map * weighted_valid).sum()
-        return numerator, denominator
+        err = self._error_map(pred_safe, target_safe)
+
+        valid_f = valid.to(dtype=prediction.dtype)
+        num_per_trait = (err * valid_f).sum(dim=(0, 2, 3))
+        den_per_trait = valid_f.sum(dim=(0, 2, 3))
+        has_valid = den_per_trait > 0
+
+        if not bool(has_valid.any()):
+            zero = prediction.sum() * 0.0
+            return zero, zero, zero
+
+        trait_loss = num_per_trait[has_valid] / den_per_trait[has_valid].clamp_min(
+            self.eps
+        )
+        numerator = trait_loss.sum()
+        denominator = has_valid.sum().to(dtype=prediction.dtype)
+        valid_count = den_per_trait[has_valid].sum()
+        return numerator, denominator, valid_count
+
+    def loss_components(
+        self,
+        prediction: torch.Tensor,
+        target_bundle: dict[str, dict[str, torch.Tensor]],
+        _unused_source_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+        y_splot = target_bundle.get(self.primary_dataset, {}).get("y")
+        y_gbif = target_bundle.get(self.auxiliary_dataset, {}).get("y")
+
+        if self.mode == "splot_only":
+            if y_splot is None:
+                raise ValueError("splot_only requires primary dataset targets.")
+            num_splot, den_splot, valid_splot = self._dataset_components(
+                prediction, y_splot
+            )
+            loss_splot = (
+                num_splot / den_splot
+                if bool((den_splot > 0).item())
+                else prediction.sum() * 0.0
+            )
+            details = {
+                "loss_total": float(loss_splot.detach().item()),
+                "loss_splot": float(loss_splot.detach().item()),
+                "loss_gbif": float("nan"),
+                "valid_splot": float(valid_splot.detach().item()),
+                "valid_gbif": 0.0,
+                "lambda_gbif": self.lambda_gbif,
+                "effective_gbif_splot_ratio": float("nan"),
+                "valid_total": float(valid_splot.detach().item()),
+            }
+            return num_splot, den_splot, details
+
+        if self.mode != "source_aware_comb_single_head":
+            raise ValueError(
+                f"Unsupported mode '{self.mode}'. Use splot_only|source_aware_comb_single_head."
+            )
+        if y_splot is None or y_gbif is None:
+            raise ValueError(
+                "source_aware_comb_single_head requires both primary and auxiliary targets."
+            )
+
+        num_splot, den_splot, valid_splot = self._dataset_components(
+            prediction, y_splot
+        )
+        num_gbif, den_gbif, valid_gbif = self._dataset_components(prediction, y_gbif)
+
+        loss_splot = (
+            num_splot / den_splot
+            if bool((den_splot > 0).item())
+            else prediction.sum() * 0.0
+        )
+        loss_gbif = (
+            num_gbif / den_gbif
+            if bool((den_gbif > 0).item())
+            else prediction.sum() * 0.0
+        )
+        combined_num = num_splot + self.lambda_gbif * num_gbif
+        combined_den = den_splot + self.lambda_gbif * den_gbif
+        total_loss = (
+            combined_num / combined_den
+            if bool((combined_den > 0).item())
+            else prediction.sum() * 0.0
+        )
+
+        details = {
+            "loss_total": float(total_loss.detach().item()),
+            "loss_splot": float(loss_splot.detach().item()),
+            "loss_gbif": float(loss_gbif.detach().item()),
+            "valid_splot": float(valid_splot.detach().item()),
+            "valid_gbif": float(valid_gbif.detach().item()),
+            "lambda_gbif": self.lambda_gbif,
+            "effective_gbif_splot_ratio": float(
+                (self.lambda_gbif * valid_gbif / valid_splot).detach().item()
+            )
+            if bool((valid_splot > 0).item())
+            else float("nan"),
+            "valid_total": float((valid_splot + valid_gbif).detach().item()),
+        }
+        return combined_num, combined_den, details
 
     def forward(
         self,
         prediction: torch.Tensor,
-        target: torch.Tensor,
-        source_mask: torch.Tensor,
+        target_bundle: dict[str, dict[str, torch.Tensor]],
+        source_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        numerator, denominator = self.loss_components(prediction, target, source_mask)
-        if not bool((denominator > 0).item()):
-            return prediction.sum() * 0.0
-        return numerator / denominator
+        numerator, denominator, _ = self.loss_components(
+            prediction, target_bundle, source_mask
+        )
+        if bool((denominator > 0).item()):
+            return numerator / denominator
+        return prediction.sum() * 0.0

@@ -1,0 +1,87 @@
+# @package _global_
+defaults:
+  - /models: respatch
+  - _self_
+
+data:
+  root_dir: /scratch3/plant-traits-v2/data/
+  resolution_km: 22
+  chips_dirname: chips_luca
+  patch_size: 7
+  stride: 3
+
+  predictors:
+    canopy_height:
+      use: true
+    modis:
+      use: true
+    soil_grids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
+
+  targets:
+    mode: source_aware_comb_single_head  # splot_only | source_aware_comb_single_head
+    primary_dataset: splot
+    auxiliary_dataset: gbif
+    eval_dataset: splot
+    traits: []  # Empty means: all traits
+    bands: [mean]
+
+data_loaders:
+  batch_size: 32
+  num_workers: 4
+  train_fraction: 1.0
+  val_fraction: 1.0
+  subset_seed: 0
+
+train:
+  seed: 0
+  run_name: null
+  group: null
+  epochs: 25
+  init_checkpoint_path: null
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 1e-4
+    weight_decay: 5e-5
+
+  loss:
+    _target_: ptev2.loss.SourceAwareLoss
+    error_type: smooth_l1
+    huber_delta: 1.0
+    lambda_gbif: 0.1
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.StepLR
+    step_size: 10
+    gamma: 0.7
+
+  supervision:
+    mode: center_pixel  # dense | center_pixel | center_crop
+    center_crop_size: 3
+
+  predictor_validity:
+    mode: min_fraction   # all_channels | any_channel | min_fraction
+    min_finite_ratio: 0.2
+
+  selection:
+    metric: val_splot_macro_rmse  # val_splot_macro_rmse | val_splot_macro_pearson | val_splot_rmse | val_loss
+    mode: min
+
+  gradient_clip_norm: 1.0
+
+  early_stopping:
+    enabled: true
+    patience: 8
+    min_delta: 0.0
+
+checkpoint_dir: /scratch3/plant-traits-v2/checkpoints/
+
+wandb:
+  enabled: true
+  entity: plant-traits-v2
+  project: Project_PTV2
