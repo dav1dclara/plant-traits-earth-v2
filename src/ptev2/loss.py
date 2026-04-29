@@ -178,6 +178,7 @@ class WeightedMaskedDenseLoss(nn.Module):
         prediction: torch.Tensor,
         target: torch.Tensor,
         source_mask: torch.Tensor,
+        sample_weight: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if prediction.shape != target.shape:
             raise ValueError(
@@ -206,6 +207,11 @@ class WeightedMaskedDenseLoss(nn.Module):
         )
 
         weighted_valid = valid.to(dtype=prediction.dtype) * weights
+        # Idea 3: optional per-position quality weight (e.g. splot_count / splot_std).
+        # Multiplies both numerator and denominator, so it re-weights the contribution
+        # of each chip/trait relative to the batch average.
+        if sample_weight is not None:
+            weighted_valid = weighted_valid * sample_weight
         denominator = weighted_valid.sum()
         if not bool((denominator > 0).item()):
             zero = prediction.sum() * 0.0

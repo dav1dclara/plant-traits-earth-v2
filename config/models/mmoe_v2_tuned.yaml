@@ -1,0 +1,19 @@
+# MMoE v2 Tuned — same architecture as mmoe_v2.yaml.
+# The "tuned" distinction is in the training config (chips_v1_tuned.yaml):
+#   - mmoe.trait_groups uses data-driven k=8 groups from trait correlation analysis
+#     instead of the 4 biologically-guessed groups in chips_v1.yaml
+#   - This affects the group_consistency_loss, encouraging traits in the same
+#     cluster to route through the same experts.
+# n_experts=8 deliberately matches the k=8 data-driven trait groups.
+_target_: ptev2.models.models.GatedMMoEModelV3
+pca_n_components: null
+base_channels: 48
+norm: gn
+gn_groups: 8
+stride_blocks: [1, 1, 1, 1]
+dropout_p: 0.1
+n_experts: 8
+expert_hidden: 96
+gate_temperature: 0.8
+gate_top_k: 2
+residual_scale: 0.0

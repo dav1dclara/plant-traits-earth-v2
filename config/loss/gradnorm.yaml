@@ -1,0 +1,17 @@
+# GradNormMTLLoss — dynamic per-task weighting via relative training-rate tracking.
+# Inspired by Chen et al. 2018 (GradNorm). Tasks improving slower get higher weight.
+# log_weights parameters are included in the optimizer via loss_fn.parameters().
+#
+# Key hyperparameters:
+#   alpha: how aggressively to rebalance (1.5 recommended; higher = more aggressive)
+#   ema_decay: smoothing for per-task loss EMA (0.98 = slow-changing reference)
+#   gradnorm_weight: regularization strength pushing log_weights toward target
+_target_: ptev2.models.multitask_v2.GradNormMTLLoss
+n_traits: 37
+alpha: 1.5
+ema_decay: 0.98
+gradnorm_weight: 0.1
+w_gbif: 1.0
+w_splot: 16.0
+error_type: smooth_l1
+huber_delta: 1.0

@@ -1,0 +1,11 @@
+_target_: ptev2.models.models.MTLModel
+pca_n_components: null  # set to int (e.g. 64) to enable PCA input projection
+base_channels: 48
+norm: gn
+gn_groups: 8
+stride_blocks: [1, 1, 1, 1]
+dropout_p: 0.1
+# Each trait gets its own 3×3 + 1×1 head instead of sharing one 3×3 conv.
+# This is the key fix: traits now genuinely specialise instead of all seeing
+# the same shared intermediate features (which made MTL ≈ STL before).
+per_trait_conv: true

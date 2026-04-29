@@ -1,0 +1,16 @@
+# MTL v2 Tuned — same architecture as mtl_v2.yaml.
+# The "tuned" distinction is in the training config (chips_v1_tuned.yaml):
+#   - mmoe.trait_groups uses data-driven k=8 groups from trait correlation analysis
+#   - The MTLModel.get_group_consistency_loss() method is called with these groups
+#     to minimize variance of DeeperTaskHead intermediate features within each group.
+#   - This gives the MTL model an equivalent biological-prior signal as the MMoE
+#     group_consistency_loss, making the comparison fair.
+# per_trait_conv=true is required for get_group_consistency_loss to work.
+_target_: ptev2.models.models.MTLModel
+pca_n_components: null
+base_channels: 48
+norm: gn
+gn_groups: 8
+stride_blocks: [1, 1, 1, 1]
+dropout_p: 0.1
+per_trait_conv: true

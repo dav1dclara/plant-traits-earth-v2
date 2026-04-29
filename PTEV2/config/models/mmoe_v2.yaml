@@ -1,0 +1,20 @@
+# Improved MMoE config with sparse routing and larger capacity.
+#
+# Key changes from v1:
+#   - n_experts: 8 (was 4) — more experts to specialize across trait groups
+#   - gate_top_k: 2 (was 3) — 25% sparse routing (was 75%), forcing real specialization
+#   - gate_temperature: 0.8 (was 1.2) — sharper gate distributions
+#   - base_channels: 48 (was 32) — larger shared backbone
+#   - expert_hidden: 96 (was 64) — more expert capacity
+_target_: ptev2.models.models.GatedMMoEModelV3
+pca_n_components: null  # set to int (e.g. 64) to enable PCA input projection
+base_channels: 48
+norm: gn
+gn_groups: 8
+stride_blocks: [1, 1, 1, 1]
+dropout_p: 0.1
+n_experts: 8
+expert_hidden: 96
+gate_temperature: 0.8
+gate_top_k: 2
+residual_scale: 0.0

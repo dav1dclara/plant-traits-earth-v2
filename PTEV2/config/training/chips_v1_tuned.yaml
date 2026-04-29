@@ -1,0 +1,124 @@
+# @package _global_
+# Training config — TUNED version.
+#
+# Identical to chips_v1.yaml except the mmoe.trait_groups are replaced with
+# data-driven k=8 groupings derived from the trait correlation analysis
+# (Ward clustering on 1-|r| distance matrix, see viz/analysis/trait_groupings.yaml).
+#
+# What changes:
+#   - mmoe.trait_groups: 4 biologically-guessed groups → 8 data-driven groups
+#     (from trait_correlation.py analysis, k=8_recommended)
+#   - The group_consistency_loss now enforces biologically coherent expert routing
+#     for MMoE, and similar intermediate features for tuned MTL.
+#
+# Usage:
+#   # MMoE tuned — data-driven expert routing
+#   python scripts/train_chips.py --config-name training/chips_v1_tuned \
+#       models=mmoe_v2_tuned data.patch_size=3 train.run_name=chips_mmoe_tuned_p3
+#
+#   # MTL tuned — group-consistency loss on per-trait head intermediate features
+#   python scripts/train_chips.py --config-name training/chips_v1_tuned \
+#       models=mtl_v2_tuned data.patch_size=3 train.run_name=chips_mtl_tuned_p3
+
+defaults:
+  - /models: mmoe_v2
+  - _self_
+
+data:
+  root_dir: /scratch3/plant-traits-v2/data/
+  patch_size: 7
+  zarr_dir: 22km/chips_luca/patch7_stride3
+  add_latlon: false
+
+data_loaders:
+  batch_size: 128
+  num_workers: 8
+
+train:
+  seed: 42
+  run_name: null
+  group: null
+  epochs: 100
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 2e-4
+    weight_decay: 1e-5
+
+  splot_loss:
+    _target_: ptev2.loss.WeightedMaskedDenseLoss
+    error_type: smooth_l1
+    huber_delta: 1.0
+    w_gbif: 0.0
+    w_splot: 1.0
+
+  gbif_loss:
+    _target_: ptev2.loss.WeightedMaskedDenseLoss
+    error_type: smooth_l1
+    huber_delta: 1.0
+    w_gbif: 1.0
+    w_splot: 0.0
+
+  aux_gbif_weight: 0.15
+
+  gbif_calib: true
+
+  eval_all_splot: false
+
+  uncertainty:
+    enabled: false
+    init_log_sigma_sq: 0.0
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.StepLR
+    step_size: 15
+    gamma: 0.7
+
+  gradient_clip_norm: 1.0
+
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 0.0
+
+# MMoE auxiliary losses — also used by tuned MTL (get_group_consistency_loss).
+mmoe:
+  load_balance_weight: 0.01
+  group_consistency_weight: 0.01
+
+  # Data-driven k=8 trait groups from trait correlation analysis.
+  # Source: viz/analysis/trait_groupings.yaml → k8_recommended
+  # Format: list of lists of trait numbers (the numeric ID in "X{id}" without X prefix).
+  # The train script maps these via trait_id_to_idx → 0-based indices for the loss.
+  trait_groups:
+    # G0: Leaf economics cluster (tightest, mean|r|=0.789)
+    #     X144=LDMC, X145=LNC, X163=SLA, X3112/3113/3114=NDVI-derived, X55=leaf area
+    - [144, 145, 163, 3112, 3113, 3114, 55]
+    # G1: Stem / photosynthesis (mean|r|=0.715)
+    #     X1080=SLA-derived, X21=photosynthesis, X3106/3107=NDVI proxies, X95=stem density
+    - [1080, 21, 3106, 3107, 95]
+    # G2: Size / growth traits (mean|r|=0.558)
+    #     X237=dispersal, X26=height, X27=stem diam, X4=stem C, X6=stem N, X614=SRL
+    - [237, 26, 27, 4, 6, 614]
+    # G3: Leaf allocation (mean|r|=0.631)
+    #     X14/X146 are near-perfect negatives (r=-0.96), X15=LWC, X3120=leaf N, X47=leaf P
+    - [14, 146, 15, 3120, 47]
+    # G4: Resource acquisition (mean|r|=0.514)
+    #     X223=root diam, X3117=root N, X46=root P, X50=root tissue density
+    - [223, 3117, 46, 50]
+    # G5: Isolated pair (mean|r|=0.807, poorly correlated with everything else)
+    #     X282=seed mass, X289=seed number
+    - [282, 289]
+    # G6: Water / nutrient traits (mean|r|=0.546)
+    #     X138=Hg, X169=Pb, X224=Sr, X281=Ca (leaf element concentrations)
+    - [138, 169, 224, 281]
+    # G7: Highly variable / independent traits (lowest coherence, mean|r|=0.295)
+    #     X13=CV=74%, X297=CV=74%, X351=CV=92%, X78=hard to predict
+    - [13, 297, 351, 78]
+
+checkpoint_dir: /scratch3/plant-traits-v2/dsaini/plant-traits-earth-v2/PTEV2/results/checkpoints/
+
+wandb:
+  enabled: false
+  entity: plant-traits-v2
+  project: Project_PTV2

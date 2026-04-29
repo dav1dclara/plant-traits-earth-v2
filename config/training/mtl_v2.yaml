@@ -1,0 +1,113 @@
+# @package _global_
+# Training config for MMoE/MTL v2 models with switchable loss type.
+#
+# Usage:
+#   python scripts/trainv2.py --config-name training/mtl_v2                # MMoE + weighted (default)
+#   python scripts/trainv2.py --config-name training/mtl_v2_gradnorm       # MMoE + GradNorm
+#   python scripts/trainv2.py --config-name training/mtl_v2_uncertainty    # MMoE + Uncertainty
+#
+# Switch model type via override:
+#   python scripts/trainv2.py --config-name training/mtl_v2 models=mtl_v2     # MTL model
+#   python scripts/trainv2.py --config-name training/mtl_v2 models=respatch   # STL model
+#
+defaults:
+  - /models: mmoe_v2
+  - _self_
+
+data:
+  root_dir: /scratch3/plant-traits-v2/data/
+  resolution_km: 22
+  patch_size: 15
+  stride: 10
+
+  predictors:
+    canopy_height:
+      use: true
+    modis:
+      use: true
+    soil_grids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
+
+  targets:
+    dataset: comb
+    traits: []
+    bands: [mean]
+
+data_loaders:
+  batch_size: 32
+  num_workers: 4
+
+train:
+  seed: 0
+  run_name: null
+  group: null
+  epochs: 50
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 2e-4
+    weight_decay: 1e-5
+
+  # Loss type — weighted (best so far). See mtl_v2_gradnorm.yaml and mtl_v2_uncertainty.yaml
+  # for the other loss types (or override individual keys via CLI).
+  loss:
+    _target_: ptev2.loss.WeightedMaskedDenseLoss
+    error_type: smooth_l1
+    huber_delta: 1.0
+    w_gbif: 0.5
+    w_splot: 8.0
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.StepLR
+    step_size: 10
+    gamma: 0.7
+
+  scheduler_step:
+    mode: epoch
+    metric: val_rmse_splot_overall
+
+  gradient_clip_norm: 1.0
+
+  early_stopping:
+    enabled: true
+    patience: 15
+    min_delta: 0.0
+
+  # Trait IDs to exclude from the loss (model still predicts them, they just don't backprop).
+  # Useful for ablation: remove unlearnable traits (223, 95, 138, 289, 224) from the shared loss.
+  # Example: mask_traits: [223, 95, 138, 289, 224]
+  mask_traits: []
+
+  # Auxiliary quantile supervision: predicts q05 and q95 alongside the primary mean.
+  # Adds extra gradient signal to the shared backbone at minimal parameter cost.
+  # The aux head is NOT saved in the primary checkpoint and does not affect test.py.
+  aux_bands: [q05, q95]
+  aux_weight: 0.1
+
+  logging:
+    log_val_mae_splot: true
+
+# MMoE auxiliary losses + trait group routing consistency.
+# Set to 0.0 to disable. These are no-ops for STL/MTL (trainv2.py checks hasattr).
+mmoe:
+  load_balance_weight: 0.0
+  group_consistency_weight: 0.0
+
+  # Trait ID → channel index mapping for group-consistency loss.
+  # trainv2.py maps trait IDs to channel indices using zarr trait ordering.
+  trait_groups:
+    - [237, 4, 13, 46, 47, 50, 146, 169, 297, 3106, 3107]   # group_0: SSD, C, height, density
+    - [55, 144, 145, 163, 281, 351, 3112, 3113]               # group_1: leaf morphology
+    - [3114, 14, 15, 78, 95, 223, 614, 1080, 3117, 3120]     # group_2: leaf chemistry + SRL
+    - [26, 6, 21, 27, 138, 224, 282, 289]                     # group_3: seed + wood anatomy
+
+checkpoint_dir: /scratch3/plant-traits-v2/dsaini/plant-traits-earth-v2/scripts/Checkpoints_Scores/checkpoints/
+
+wandb:
+  enabled: false
+  entity: plant-traits-v2
+  project: Project_PTV2

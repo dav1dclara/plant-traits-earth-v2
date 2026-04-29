@@ -1,0 +1,29 @@
+paths:
+  data_root: /scratch3/plant-traits-v2/data
+  resolution: 22km
+  transform_csv: ${paths.data_root}/power_transformer_params.csv
+  gbif_input_dir: ${paths.data_root}/${paths.resolution}/gbif
+  splot_input_dir: ${paths.data_root}/${paths.resolution}/splot
+  gbif_output_dir: ${paths.data_root}/${paths.resolution}/gbif_original
+  splot_output_dir: ${paths.data_root}/${paths.resolution}/splot_original
+  summary_dir: ${paths.data_root}/${paths.resolution}
+
+settings:
+  dry_run: false
+  overwrite: false
+  sample_limit: null
+  glob_pattern: "*.tif"
+  output_suffix: _original
+
+sources:
+  gbif:
+    enabled: true
+  splot:
+    enabled: true
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

@@ -1,0 +1,103 @@
+# @package _global_
+# MMoE v2 training with GradNorm adaptive loss weighting.
+#
+# Usage:
+#   python scripts/trainv2.py --config-name training/mtl_v2_gradnorm
+#   python scripts/trainv2.py --config-name training/mtl_v2_gradnorm models=mtl_v2  # MTL + GradNorm
+#
+# GradNorm: tracks per-task EMA losses, drives weights to equalize training rates.
+# Tasks with slower improvement (higher relative loss) get higher weight.
+# Compare test performance vs mtl_v2.yaml (weighted) to assess improvement.
+#
+# @package _global_
+defaults:
+  - /models: mmoe_v2
+  - _self_
+
+data:
+  root_dir: /scratch3/plant-traits-v2/data/
+  resolution_km: 22
+  patch_size: 15
+  stride: 10
+
+  predictors:
+    canopy_height:
+      use: true
+    modis:
+      use: true
+    soil_grids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
+
+  targets:
+    dataset: comb
+    traits: []
+    bands: [mean]
+
+data_loaders:
+  batch_size: 32
+  num_workers: 4
+
+train:
+  seed: 0
+  run_name: null
+  group: null
+  epochs: 50
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 2e-4
+    weight_decay: 1e-5
+
+  loss:
+    _target_: ptev2.models.multitask_v2.GradNormMTLLoss
+    n_traits: 37
+    alpha: 1.5          # rebalancing aggressiveness (higher = stronger rebalancing)
+    ema_decay: 0.98     # smoothing for per-task loss tracking
+    gradnorm_weight: 0.1  # strength of weight regularization toward target
+    w_gbif: 0.5
+    w_splot: 8.0
+    error_type: smooth_l1
+    huber_delta: 1.0
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.StepLR
+    step_size: 10
+    gamma: 0.7
+
+  scheduler_step:
+    mode: epoch
+    metric: val_rmse_splot_overall
+
+  gradient_clip_norm: 1.0
+
+  early_stopping:
+    enabled: true
+    patience: 15
+    min_delta: 0.0
+
+  # Auxiliary quantile supervision (same as mtl_v2.yaml)
+  aux_bands: [q05, q95]
+  aux_weight: 0.1
+
+  logging:
+    log_val_mae_splot: true
+
+mmoe:
+  load_balance_weight: 0.01
+  group_consistency_weight: 0.005
+  trait_groups:
+    - [237, 4, 13, 46, 47, 50, 146, 169, 297, 3106, 3107]   # group_0: SSD, C, height, density
+    - [55, 144, 145, 163, 281, 351, 3112, 3113]               # group_1: leaf morphology
+    - [3114, 14, 15, 78, 95, 223, 614, 1080, 3117, 3120]     # group_2: leaf chemistry + SRL
+    - [26, 6, 21, 27, 138, 224, 282, 289]                     # group_3: seed + wood anatomy
+
+checkpoint_dir: /scratch3/plant-traits-v2/dsaini/plant-traits-earth-v2/scripts/Checkpoints_Scores/checkpoints/
+
+wandb:
+  enabled: false
+  entity: plant-traits-v2
+  project: Project_PTV2

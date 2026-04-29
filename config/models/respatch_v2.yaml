@@ -1,0 +1,14 @@
+# STL model using multitask_v2.STLModel (SharedEncoder backbone).
+# Equivalent in capacity to respatch.yaml (ResPatchCNN) but supports optional
+# PCA input projection via pca_n_components.
+#
+# Usage:
+#   python scripts/trainv2.py models=respatch_v2 train.run_name=stl_pca64 models.pca_n_components=64
+#   python scripts/trainv2.py models=respatch_v2 train.run_name=stl_v2      # no PCA (default)
+_target_: ptev2.models.models.STLModel
+base_channels: 48
+norm: gn
+gn_groups: 8
+stride_blocks: [1, 1, 1, 1]
+dropout_p: 0.1
+pca_n_components: null  # set to int (e.g. 64) to enable PCA input projection

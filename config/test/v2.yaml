@@ -1,0 +1,29 @@
+# Test config for v2 experiments (STL / MTL / MMoE).
+# Mirrors the run_name convention used in training.
+#
+# Usage:
+#   python scripts/test.py --config-name v2 run_name=stl_weighted
+#   python scripts/test.py --config-name v2 run_name=stl_weighted checkpoint_path=.../stl_weighted_best_r.pth
+#
+# Outputs (all inside Checkpoints_Scores, keyed by run_name):
+#   checkpoints/  ← written by trainv2.py (not test.py)
+#   metrics/      ← JSON test scores
+#   predictions/  ← GeoTIFF prediction map
+
+run_name: null           # set via CLI: run_name=stl_weighted
+checkpoint_path: null    # optional override; if null, resolved from run_name
+
+checkpoint_dir: /scratch3/plant-traits-v2/dsaini/plant-traits-earth-v2/scripts/Checkpoints_Scores/checkpoints/
+output_dir:     /scratch3/plant-traits-v2/dsaini/plant-traits-earth-v2/scripts/Checkpoints_Scores/metrics/
+prediction_out_dir: /scratch3/plant-traits-v2/dsaini/plant-traits-earth-v2/scripts/Checkpoints_Scores/predictions/
+
+prediction_tif_name: null   # defaults to {run_name}.tif
+test_split: test
+save_arrays: false           # set true if you want raw .npy arrays saved
+save_full_trait_metrics: true
+
+wandb:
+  enabled: false
+  entity: plant-traits-v2
+  project: Project_PTV2
+  log_trait_metrics: false

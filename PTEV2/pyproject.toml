@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ptev2"
+version = "0.0.0"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["I"]
+ignore = ["F841"]

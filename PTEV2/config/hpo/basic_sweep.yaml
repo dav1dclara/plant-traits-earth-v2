@@ -1,0 +1,60 @@
+program: scripts/train.py
+entity: plant-traits-v2
+project: Project_PTV2
+method: bayes
+name: respatch-stl-hpo
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}
+metric:
+  name: val/rmse
+  goal: minimize
+early_terminate:
+  type: hyperband
+  min_iter: 5
+  eta: 3
+parameters:
+  train.seed:
+    value: 0
+  train.epochs:
+    value: 35
+  train.early_stopping.enabled:
+    value: true
+  train.early_stopping.patience:
+    value: 6
+  train.early_stopping.min_delta:
+    value: 0.0
+  train.optimizer.lr:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.001
+  train.optimizer.weight_decay:
+    distribution: log_uniform_values
+    min: 0.000001
+    max: 0.001
+  train.loss.error_type:
+    value: smooth_l1
+  train.loss.huber_delta:
+    values: [0.5, 1.0, 2.0]
+  train.loss.w_gbif:
+    values: [0.5, 1.0, 2.0]
+  train.loss.w_splot:
+    values: [2.0, 4.0, 6.0, 8.0, 10.0]
+  train.scheduler.step_size:
+    values: [5, 10, 15]
+  train.scheduler.gamma:
+    values: [0.5, 0.7, 0.85, 0.95]
+  train.gradient_clip_norm:
+    values: [0.5, 1.0, 2.0, 5.0]
+  models.base_channels:
+    values: [32, 48, 64]
+  models.head_depth:
+    values: [1, 2]
+  models.dropout_p:
+    distribution: uniform
+    min: 0.05
+    max: 0.50
+  data_loaders.batch_size:
+    values: [32, 64, 96]

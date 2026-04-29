@@ -1,0 +1,138 @@
+# @package _global_
+# Training config for Ideas 1+2: SPLOT-only primary loss + linearly-calibrated
+# GBIF auxiliary loss, using chips_luca/patch7_stride3 zarr.
+#
+# The chips_luca zarr has:
+#   - 46,375 train chips
+#   - 13,504 val chips
+#   -  7,041 test chips
+# Target format: separate splot/gbif arrays with 6 channels per trait (222 total).
+# Channel 0 of each 6-group is the mean trait value; NaN = no observation.
+# CRS: EPSG:6933 (Equal-Earth projection).  Stride 3 (sparser than stride 1).
+#
+# Usage:
+#   # MMoE V3 — default, best target model
+#   python scripts/train_chips.py
+#
+#   # STL — sanity baseline
+#   python scripts/train_chips.py models=respatch_v2 train.run_name=chips_stl
+#
+#   # MTL — cross-trait shared encoder
+#   python scripts/train_chips.py models=mtl_v2 train.run_name=chips_mtl
+#
+#   # MMoE V3 with PCA
+#   python scripts/train_chips.py models.pca_n_components=64 train.run_name=chips_mmoe_pca64
+#
+#   # Enable W&B
+#   python scripts/train_chips.py wandb.enabled=true train.run_name=chips_mmoe_v1
+
+defaults:
+  - /models: mmoe_v2
+  - _self_
+
+data:
+  root_dir: /scratch3/plant-traits-v2/data/
+  # Fixed at patch7_stride3 — the only available chips_luca variant.
+  patch_size: 7
+  zarr_dir: 22km/chips_luca/patch7_stride3
+  # Add 4 sinusoidal geographic channels to predictor X: [sin_lon, cos_lon, sin_lat, cos_lat].
+  # Increases in_channels from 150 to 154. Reversible: retrain with add_latlon=false to restore.
+  # Override: python scripts/train_chips.py data.add_latlon=true
+  add_latlon: false
+
+data_loaders:
+  batch_size: 128
+  num_workers: 8
+
+train:
+  seed: 42
+  run_name: null
+  group: null
+  epochs: 100
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 2e-4
+    weight_decay: 1e-5
+
+  # Primary loss: SPLOT supervision only.
+  # supervision_splot_only has source values {0=no-data, 2=SPLOT}.
+  # w_gbif=0.0 is explicit (source=1 pixels never appear in this array anyway).
+  splot_loss:
+    _target_: ptev2.loss.WeightedMaskedDenseLoss
+    error_type: smooth_l1
+    huber_delta: 1.0
+    w_gbif: 0.0
+    w_splot: 1.0
+
+  # Auxiliary loss: linearly-calibrated GBIF supervision.
+  # supervision_gbif_only has source values {0=no-data, 1=GBIF}.
+  # Applied at weight aux_gbif_weight in the training loop.
+  gbif_loss:
+    _target_: ptev2.loss.WeightedMaskedDenseLoss
+    error_type: smooth_l1
+    huber_delta: 1.0
+    w_gbif: 1.0
+    w_splot: 0.0
+
+  # Weight for the GBIF auxiliary loss component.
+  # 0.15 = GBIF provides 15% of the total gradient signal.
+  aux_gbif_weight: 0.15
+
+  # Ablation: set to false to skip GBIF→SPLOT linear calibration (identity: scale=1, shift=0).
+  # Compare a run with gbif_calib=false vs the default (true) to isolate the
+  # contribution of calibration vs. simply having the GBIF aux signal at all.
+  gbif_calib: true
+
+  # Evaluate Pearson-r at ALL SPLOT pixels in each patch (not just center pixel).
+  # Gives more validation samples but may double-count locations shared across chips.
+  # Override: python scripts/train_chips.py train.eval_all_splot=true
+  eval_all_splot: false
+
+  # Uncertainty-weighted loss (Kendall et al., 2018).
+  # When enabled=true, replaces splot_loss with UncertaintyWeightedMTLLoss.
+  # Each trait gets a learnable log-variance σ_t² — traits that are harder to
+  # predict automatically get down-weighted, preventing easy traits from
+  # dominating the gradient.  Adds N_TRAITS=37 scalar parameters (negligible).
+  # Recommended for MTL/MMoE; optional for STL.
+  #
+  # To enable:   python scripts/train_chips.py train.uncertainty.enabled=true
+  uncertainty:
+    enabled: false
+    init_log_sigma_sq: 0.0   # start with equal weights; will diverge during training
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.StepLR
+    step_size: 15
+    gamma: 0.7
+
+  gradient_clip_norm: 1.0
+
+  early_stopping:
+    enabled: true
+    # Generous patience — chips_centered has more diversity per epoch than patch15.
+    patience: 20
+    min_delta: 0.0
+
+# MMoE auxiliary losses — kept here for GatedMMoEModelV3 runs.
+# Set to 0.0 to disable. These are no-ops for STL/MTL (train_chips.py checks hasattr).
+mmoe:
+  # Switch-Transformer style load-balancing: penalises routing all tokens to
+  # the same expert. 0.01 is a small nudge — won't hurt main loss (~1% scale).
+  load_balance_weight: 0.01
+  # Encourages trait groups to route through similar experts (biological prior).
+  group_consistency_weight: 0.01
+
+  # Same trait groups as mtl_v2.yaml — biologically motivated routing.
+  trait_groups:
+    - [237, 4, 13, 46, 47, 50, 146, 169, 297, 3106, 3107]   # SSD, C, height, density
+    - [55, 144, 145, 163, 281, 351, 3112, 3113]               # leaf morphology
+    - [3114, 14, 15, 78, 95, 223, 614, 1080, 3117, 3120]     # leaf chemistry + SRL
+    - [26, 6, 21, 27, 138, 224, 282, 289]                     # seed + wood anatomy
+
+checkpoint_dir: /scratch3/plant-traits-v2/dsaini/plant-traits-earth-v2/scripts/Checkpoints_Scores/checkpoints/
+
+wandb:
+  enabled: false
+  entity: plant-traits-v2
+  project: Project_PTV2

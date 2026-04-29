@@ -1,0 +1,3 @@
+# W&B settings (referenced in train_chips.py via cfg.wandb.*)
+entity: plant-traits-v2
+project: Project_PTV2

@@ -30,3 +30,9 @@ multirun/
 
 /MTL/
 analysis/
+
+scripts/__temp_dev/MTL/
+scripts/__temp_dev/OLD_MTL/
+scripts/Checkpoints_Scores/
+PTEV2/results/
+results/

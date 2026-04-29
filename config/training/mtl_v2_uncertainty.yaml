@@ -1,0 +1,97 @@
+# @package _global_
+# MMoE v2 training with uncertainty-based adaptive loss weighting.
+#
+# Usage:
+#   python scripts/trainv2.py --config-name training/mtl_v2_uncertainty
+#   python scripts/trainv2.py --config-name training/mtl_v2_uncertainty models=mtl_v2
+#
+# UncertaintyWeightedMTLLossV2: per-trait learnable log-sigma weighting with
+# Smooth-L1 base loss (unlike original which uses MSE). log_sigma_sq params
+# are included in the optimizer via loss_fn.parameters().
+#
+# @package _global_
+defaults:
+  - /models: mmoe_v2
+  - _self_
+
+data:
+  root_dir: /scratch3/plant-traits-v2/data/
+  resolution_km: 22
+  patch_size: 15
+  stride: 10
+
+  predictors:
+    canopy_height:
+      use: true
+    modis:
+      use: true
+    soil_grids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
+
+  targets:
+    dataset: comb
+    traits: []
+    bands: [mean]
+
+data_loaders:
+  batch_size: 32
+  num_workers: 4
+
+train:
+  seed: 42
+  run_name: null
+  group: null
+  epochs: 100
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 1e-4
+    weight_decay: 5e-5
+
+  loss:
+    _target_: ptev2.models.multitask_v2.UncertaintyWeightedMTLLossV2
+    n_traits: 37
+    w_gbif: 1.0
+    w_splot: 16.0
+    init_log_sigma_sq: 0.0
+    error_type: smooth_l1
+    huber_delta: 1.0
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+    T_max: 100
+    eta_min: 1e-6
+
+  scheduler_step:
+    mode: epoch
+    metric: val_rmse_splot_overall
+
+  gradient_clip_norm: 5.0
+
+  early_stopping:
+    enabled: true
+    patience: 15
+    min_delta: 0.0
+
+  logging:
+    log_val_mae_splot: true
+
+mmoe:
+  load_balance_weight: 0.01
+  group_consistency_weight: 0.005
+  trait_groups:
+    - [237, 4, 13, 46, 47, 50, 146, 169, 297, 3106, 3107]   # group_0: SSD, C, height, density
+    - [55, 144, 145, 163, 281, 351, 3112, 3113]               # group_1: leaf morphology
+    - [3114, 14, 15, 78, 95, 223, 614, 1080, 3117, 3120]     # group_2: leaf chemistry + SRL
+    - [26, 6, 21, 27, 138, 224, 282, 289]                     # group_3: seed + wood anatomy
+
+checkpoint_dir: /scratch3/plant-traits-v2/dsaini/plant-traits-earth-v2/scripts/Checkpoints_Scores/checkpoints/
+
+wandb:
+  enabled: false
+  entity: plant-traits-v2
+  project: Project_PTV2

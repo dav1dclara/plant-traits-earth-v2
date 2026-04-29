@@ -1,0 +1,10 @@
+# UncertaintyWeightedMTLLossV2 — per-trait learnable log-sigma uncertainty weighting.
+# Uses Smooth-L1 base loss (unlike the original UncertaintyWeightedMTLLoss which uses MSE).
+# Note: log_sigma_sq parameters are included in the optimizer via loss_fn.parameters().
+_target_: ptev2.models.multitask_v2.UncertaintyWeightedMTLLossV2
+n_traits: 37
+w_gbif: 1.0
+w_splot: 16.0
+init_log_sigma_sq: 0.0
+error_type: smooth_l1
+huber_delta: 1.0
