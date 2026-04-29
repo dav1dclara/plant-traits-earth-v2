@@ -3,6 +3,12 @@ base_channels: 32
 head_depth: 2
 norm: "gn"
 gn_groups: 8
-# For patch 15x15: [1, 1, 1, 1]. For patch 25x25: [1, 2, 1, 2].
+# For patch 7x7 center-supervision we keep spatial resolution
+# and grow receptive field via dilation in deeper blocks.
 stride_blocks: [1, 1, 1, 1]
+encoder_dilations: [1, 1, 2, 2]
+activation: "silu"
+use_stem: true
+stem_kernel_size: 3
+output_mode: "upsample_to_input"
 dropout_p: 0.2

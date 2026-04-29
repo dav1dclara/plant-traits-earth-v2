@@ -30,6 +30,7 @@ def main(cfg: DictConfig) -> None:
     patch_size = cfg.settings.patch_size
     stride = cfg.settings.stride
     stride_per_split = {"train": stride, "val": stride, "test": stride}
+    overwrite = bool(cfg.settings.get("overwrite", False))
 
     # get predictors and targets to use
     used_predictors = {
@@ -70,6 +71,7 @@ def main(cfg: DictConfig) -> None:
     console.print("[bold]Chipping settings:[/bold]")
     console.print(f"Patch size:        [cyan]{patch_size}[/cyan] px")
     console.print(f"Stride:            [cyan]{stride}[/cyan] px")
+    console.print(f"Overwrite:         [cyan]{overwrite}[/cyan]")
 
     console.rule()
 
@@ -102,6 +104,7 @@ def main(cfg: DictConfig) -> None:
         stride_per_split=stride_per_split,
         h3_file=splits_file,
         save_all=save_all,
+        overwrite=overwrite,
     )
 
     # Export chip bounds to GeoPackage for inspection
