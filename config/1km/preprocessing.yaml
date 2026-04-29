@@ -39,6 +39,27 @@ predictors:
 #     blockxsize: 256
 #     blockysize: 256
 
+unnormalize:
+  transform_params: "/scratch3/plant-traits-v2/data/power_transformer_params.csv"
+  gbif:
+    in_dir: "${base_dir}/targets/gbif"
+    out_dir: "${base_dir}/targets/gbif_original"
+    n_workers: 8
+    output:
+      zstd_level: 1
+      blockxsize: 512
+      blockysize: 512
+      overviews: [2, 4, 8, 16, 32]
+  splot:
+    in_dir: "${base_dir}/targets/splot"
+    out_dir: "${base_dir}/targets/splot_original"
+    n_workers: 8
+    output:
+      zstd_level: 1
+      blockxsize: 512
+      blockysize: 512
+      overviews: [2, 4, 8, 16, 32]
+
 targets:
   gbif:
     in_dir: "${raw_dir}/targets/gbif"

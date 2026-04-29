@@ -30,9 +30,8 @@ def generate_h3_grids(
     """Generate all global H3 cells at the given resolution with polygons in EPSG:4326 and raster_crs."""
     all_cells = sorted(h3.uncompact_cells(h3.get_res0_cells(), h3_resolution))
     polys_4326 = [h3_to_polygon_4326(c) for c in all_cells]
-    polys_raster_crs = [
-        reproject_polygon(p, "EPSG:4326", raster_crs) for p in polys_4326
-    ]
+    transformer = Transformer.from_crs("EPSG:4326", raster_crs, always_xy=True)
+    polys_raster_crs = [shapely_transform(transformer.transform, p) for p in polys_4326]
     return all_cells, polys_4326, polys_raster_crs
 
 
@@ -234,3 +233,141 @@ def build_split_gdf(
         geometry=polys_4326,
         crs="EPSG:4326",
     ).to_crs(crs)
+
+
+def build_histograms_from_rasters(
+    raster_paths: list[Path],
+    bands: list[int],
+    cell_index: tuple[np.ndarray, np.ndarray],
+    n_cells: int,
+    n_bins: int,
+    categorical_features: set[int] | None = None,
+    progress=None,
+) -> tuple[np.ndarray, list, np.ndarray, np.ndarray, np.ndarray]:
+    """Single-pass histogram computation directly from rasters.
+
+    Replaces the store-everything approach of looping extract_cell_values then
+    build_histograms. Uses vectorized np.digitize + np.bincount — no per-cell
+    Python loops, no large intermediate pixel arrays.
+
+    Returns:
+        histograms:   float64 array (n_cells, n_features, n_bins)
+        bin_edges:    list[np.ndarray | None], length n_features
+        has_data:     bool array (n_cells,) — True if cell has any valid pixel
+        obs_counts:   int64 array (n_cells,) — valid-pixel count for feature 0
+        n_traits_obs: int32 array (n_cells,) — number of rasters with ≥1 valid pixel
+    """
+    order, boundaries = cell_index
+    n_bands_per_raster = len(bands)
+    n_features = len(raster_paths) * n_bands_per_raster
+
+    # Pre-compute cell assignment for every in-cell pixel (computed once, reused per band).
+    # boundaries[k+1]:boundaries[k+2] are the sorted-array positions for 0-indexed cell k.
+    pixel_counts = np.diff(boundaries)[1:]  # (n_cells,) pixels per cell
+    cell_id = np.repeat(np.arange(n_cells, dtype=np.int32), pixel_counts)
+    cell_start = int(boundaries[1])  # first in-cell position in the sorted array
+
+    histograms = np.zeros((n_cells, n_features, n_bins), dtype=np.float64)
+    bin_edges: list = [None] * n_features
+    has_data = np.zeros(n_cells, dtype=bool)
+    obs_counts = np.zeros(n_cells, dtype=np.int64)
+    n_traits_obs = np.zeros(n_cells, dtype=np.int32)
+    raster_obs_counts = np.zeros((n_cells, len(raster_paths)), dtype=np.int64)
+
+    for t, raster_path in enumerate(raster_paths):
+        if progress is not None:
+            _task = progress.add_task(f"{raster_path.stem}...")
+        trait_has_data = np.zeros(n_cells, dtype=bool)
+        with rasterio.open(raster_path) as src:
+            nodata = src.nodata
+            for b_idx, band in enumerate(bands):
+                feature_idx = t * n_bands_per_raster + b_idx
+
+                data = src.read(band).astype(np.float64)
+                if nodata is not None:
+                    data[data == nodata] = np.nan
+
+                # Restrict to pixels that fall inside any H3 cell
+                in_cell = data.ravel()[order][cell_start:]
+                valid = np.isfinite(in_cell)
+                vals = in_cell[valid]
+                cids = cell_id[valid].astype(np.int64)
+
+                if len(cids) > 0:
+                    trait_has_data[cids] = True
+                    has_data[cids] = True
+
+                if b_idx == 0:
+                    bc = np.bincount(cids, minlength=n_cells).astype(np.int64)
+                    raster_obs_counts[:, t] = bc
+                    if t == 0:
+                        obs_counts = bc
+
+                if len(vals) == 0:
+                    continue
+
+                if categorical_features and feature_idx in categorical_features:
+                    edges = np.array([0.5, 1.5, 2.5])
+                    bin_edges[feature_idx] = edges
+                else:
+                    vmin, vmax = float(vals.min()), float(vals.max())
+                    if vmin == vmax:
+                        continue
+                    edges = np.linspace(vmin, vmax, n_bins + 1)
+                    bin_edges[feature_idx] = edges
+
+                bin_idx = np.clip(
+                    np.digitize(vals, edges).astype(np.int64) - 1, 0, n_bins - 1
+                )
+                combined = cids * n_bins + bin_idx
+                counts = np.bincount(combined, minlength=n_cells * n_bins)
+                histograms[:, feature_idx, :] += counts.reshape(n_cells, n_bins)
+
+        n_traits_obs += trait_has_data.astype(np.int32)
+        if progress is not None:
+            progress.update(
+                _task,
+                description=f"[green]✓[/green] {raster_path.stem}",
+                completed=1,
+                total=1,
+            )
+
+    return histograms, bin_edges, has_data, obs_counts, n_traits_obs, raster_obs_counts
+
+
+def count_valid_pixels_per_raster(
+    raster_paths: list[Path],
+    band: int,
+    cell_index: tuple[np.ndarray, np.ndarray],
+    n_cells: int,
+    progress=None,
+) -> np.ndarray:
+    """Count valid (non-NaN) pixels per cell for each raster. Returns int64 array (n_cells, n_rasters)."""
+    order, boundaries = cell_index
+    pixel_counts = np.diff(boundaries)[1:]
+    cell_id = np.repeat(np.arange(n_cells, dtype=np.int32), pixel_counts)
+    cell_start = int(boundaries[1])
+
+    counts = np.zeros((n_cells, len(raster_paths)), dtype=np.int64)
+
+    for t, raster_path in enumerate(raster_paths):
+        if progress is not None:
+            _task = progress.add_task(f"{raster_path.stem}...")
+        with rasterio.open(raster_path) as src:
+            nodata = src.nodata
+            data = src.read(band).astype(np.float32)
+            if nodata is not None:
+                data[data == nodata] = np.nan
+            in_cell = data.ravel()[order][cell_start:]
+            cids = cell_id[np.isfinite(in_cell)].astype(np.int64)
+            if len(cids) > 0:
+                counts[:, t] = np.bincount(cids, minlength=n_cells)
+        if progress is not None:
+            progress.update(
+                _task,
+                description=f"[green]✓[/green] {raster_path.stem}",
+                completed=1,
+                total=1,
+            )
+
+    return counts

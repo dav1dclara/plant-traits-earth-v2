@@ -53,6 +53,7 @@ def process_gbif_tif(tif: Path, out_dir: Path, output_cfg: dict) -> tuple[str, f
     with rasterio.open(tif) as src:
         profile = src.profile.copy()
         profile.update(
+            dtype="float32",
             zstd_level=output_cfg["zstd_level"],
             tiled=True,
             blockxsize=output_cfg["blockxsize"],
@@ -65,7 +66,9 @@ def process_gbif_tif(tif: Path, out_dir: Path, output_cfg: dict) -> tuple[str, f
             for _, window in src.block_windows(1):
                 for band_idx in range(1, src.count + 1):
                     dst.write(
-                        src.read(band_idx, window=window), band_idx, window=window
+                        src.read(band_idx, window=window).astype("float32"),
+                        band_idx,
+                        window=window,
                     )
 
     with rasterio.open(out_path, "r+") as dst:
@@ -85,6 +88,7 @@ def process_splot_tif(
         band_order = [src_bands.index(b) + 1 for b in target_bands]
         profile = src.profile.copy()
         profile.update(
+            dtype="float32",
             zstd_level=output_cfg["zstd_level"],
             tiled=True,
             blockxsize=output_cfg["blockxsize"],
@@ -96,7 +100,11 @@ def process_splot_tif(
             dst.descriptions = target_bands
             for _, window in windows:
                 for out_idx, src_idx in enumerate(band_order, start=1):
-                    dst.write(src.read(src_idx, window=window), out_idx, window=window)
+                    dst.write(
+                        src.read(src_idx, window=window).astype("float32"),
+                        out_idx,
+                        window=window,
+                    )
 
     with rasterio.open(out_path, "r+") as dst:
         dst.build_overviews(output_cfg["overviews"], rasterio.enums.Resampling.average)

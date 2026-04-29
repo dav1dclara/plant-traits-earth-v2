@@ -2,7 +2,6 @@ data_dir: "/scratch3/plant-traits-v2/data/"
 
 targets:
   resolution_km: 1
-  source: "comb"
 
 h3:
   resolution: 2
@@ -13,8 +12,10 @@ splitting:
   test_frac: 0.10
 
 jsd:
-  bands: [1, 2]  # band 1 = mean, band 2 = source (only bands available at 1km)
-  source_band: 2  # band index of the source (categorical) band
+  bands: [1]
   n_restarts: 200
   n_bins: 50
   random_seed: 42
+
+debug:
+  n_traits: null  # set to an integer to limit to first N traits (e.g. 5 for quick testing)
