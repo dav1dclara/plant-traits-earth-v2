@@ -1,7 +1,6 @@
 """
 Write predictor columns from eo_predict_imputed.parquet to GeoTIFF rasters.
-Imputed values (flagged by eo_predict_mask.parquet) are set back to nodata.
-Band layout and output settings are defined in config/preprocessing/1km.yaml.
+Band layout and output settings are defined in config/1km/preprocessing.yaml.
 
 Usage:
     python write_predictors_to_tiff.py
@@ -32,12 +31,11 @@ def col_subfolder(name: str, cfg: DictConfig) -> str:
 
 @hydra.main(
     version_base=None,
-    config_path="../../../config/preprocessing",
-    config_name="1km",
+    config_path="../../../config/1km",
+    config_name="preprocessing",
 )
 def main(cfg: DictConfig) -> None:
     parquet_path = Path(cfg.predictors.parquet_file)
-    mask_path = Path(cfg.predictors.mask_file)
     ref_path = Path(cfg.ref_raster)
     out_base = Path(cfg.predictors.out_dir)
     output_cfg = cfg.predictors.output
@@ -105,15 +103,9 @@ def main(cfg: DictConfig) -> None:
                 .to_pandas()[col]
                 .values[in_bounds]
             )
-            mask_vals = (
-                pq.read_table(mask_path, columns=[col])
-                .to_pandas()[col]
-                .values[in_bounds]
-            )
 
             arr = np.full((n_rows, n_cols), nodata, dtype=np_dtype)
             arr[row_idx, col_idx] = eo_vals.astype(np_dtype)
-            arr[row_idx[mask_vals], col_idx[mask_vals]] = nodata
 
             out_path = out_dir / f"{col}.tif"
             with rasterio.open(
