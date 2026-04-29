@@ -1,6 +1,6 @@
 import zarr
 
-ZARR_DIR = "/scratch3/plant-traits-v2/data/22km/chips/patch15_stride10/"
+ZARR_DIR = "/scratch3/plant-traits-v2/data/22km/chips/patch25_stride25/"
 SPLITS = ["train", "val", "test"]
 
 for split in SPLITS:

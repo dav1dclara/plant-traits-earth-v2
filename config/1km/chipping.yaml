@@ -1,0 +1,38 @@
+paths:
+  predictors_dir: /scratch3/plant-traits-v2/data/1km/predictors/
+  targets_dir: /scratch3/plant-traits-v2/data/1km/targets/
+  splits_file: /scratch3/plant-traits-v2/data/1km/splits/h3_splits_res2_1km.gpkg
+  zarr_dir: /scratch3/plant-traits-v2/data/1km/chips/
+
+settings:
+  patch_size: 128
+  stride: 64
+  save_all: false
+
+data:
+  predictors:
+    canopy_height:
+      use: true
+      bands: []
+    modis:
+      use: true
+      bands: []
+    soilgrids:
+      use: true
+      bands: []
+    vodca:
+      use: true
+      bands: []
+    worldclim:
+      use: true
+      bands: []
+
+  targets:
+    splot:
+      use: true
+      traits: []
+      bands: [1]
+    gbif:
+      use: true
+      traits: []
+      bands: [1]
