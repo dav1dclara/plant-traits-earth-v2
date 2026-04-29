@@ -66,6 +66,7 @@ def _init_zarr_store(
     raster_height: int,
     raster_width: int,
     overwrite: bool,
+    target_bands: dict[str, list[int]] | None = None,
 ) -> tuple[zarr.Group, dict, zarr.Array]:
     """Create and pre-allocate a zarr store for a single split.
 
@@ -111,14 +112,24 @@ def _init_zarr_store(
     tgt_group = store.require_group("targets")
 
     # Store band names once on the targets group (all targets share the same band order)
-    first_tgt_srcs = next(iter(all_srcs[n] for n in targets))
-    tgt_group.attrs["band_names"] = list(first_tgt_srcs[0].descriptions)
+    first_tgt_name = next(iter(targets))
+    first_tgt_src = all_srcs[first_tgt_name][0]
+    all_band_names = list(first_tgt_src.descriptions)
+    if target_bands and first_tgt_name in target_bands:
+        tgt_group.attrs["band_names"] = [
+            all_band_names[b - 1] for b in target_bands[first_tgt_name]
+        ]
+    else:
+        tgt_group.attrs["band_names"] = all_band_names
 
     for name, group, group_name in [
         (n, pred_group, "predictors") for n in predictors
     ] + [(n, tgt_group, "targets") for n in targets]:
         srcs = all_srcs[name]
-        n_bands = sum(src.count for src in srcs)
+        if name in targets and target_bands and name in target_bands:
+            n_bands = len(target_bands[name])
+        else:
+            n_bands = sum(src.count for src in srcs)
         arrays[name] = group.create_array(
             name,
             shape=(n_chips, n_bands, patch_size, patch_size),
@@ -149,6 +160,7 @@ def chip_rasters_to_zarr(
     mask_predictors_by_split: bool = True,
     mask_targets_by_split: bool = True,
     overwrite: bool = False,
+    target_bands: dict[str, list[int]] | None = None,
 ) -> None:
     """Chip predictor and target rasters into one zarr store per split.
 
@@ -276,6 +288,7 @@ def chip_rasters_to_zarr(
                     raster_height=height,
                     raster_width=width,
                     overwrite=overwrite,
+                    target_bands=target_bands,
                 )
             )
 
@@ -284,7 +297,13 @@ def chip_rasters_to_zarr(
                 name: np.empty(
                     (
                         BUFFER_SIZE,
-                        sum(s.count for s in all_srcs[name]),
+                        len(target_bands[name])
+                        if (
+                            name in target_names
+                            and target_bands
+                            and name in target_bands
+                        )
+                        else sum(s.count for s in all_srcs[name]),
                         patch_size,
                         patch_size,
                     ),
@@ -344,6 +363,12 @@ def chip_rasters_to_zarr(
                         strips_flat[i : i + len(srcs)], axis=0
                     )
                     i += len(srcs)
+
+                # Apply target band selection (bands are 1-indexed)
+                if target_bands:
+                    for name, bands in target_bands.items():
+                        if name in strips:
+                            strips[name] = strips[name][[b - 1 for b in bands]]
 
                 for col in range(n_cols):
                     x_px = col * stride
