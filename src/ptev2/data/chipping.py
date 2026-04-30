@@ -180,6 +180,7 @@ def chip_rasters_to_zarr(
     mask_targets_by_split: bool = True,
     split_assignment: str = "any_overlap",
     min_split_pixels: int = 1,
+    require_valid_target: bool = True,
     overwrite: bool = False,
     target_bands: dict[str, list[int]] | None = None,
 ) -> None:
@@ -392,6 +393,8 @@ def chip_rasters_to_zarr(
         }
         buf_pos = {s: 0 for s in group_splits}
         buf_start = {s: 0 for s in group_splits}
+        written_count = {s: 0 for s in group_splits}
+        skipped_invalid_target = {s: 0 for s in group_splits}
 
         def flush(split_name: str, count: int) -> None:
             start = buf_start[split_name]
@@ -526,6 +529,26 @@ def chip_rasters_to_zarr(
                             continue
 
                         for split_name in chip_splits:
+                            if require_valid_target:
+                                if split_name == "all":
+                                    valid_region = mask_chip >= 0
+                                else:
+                                    valid_region = (
+                                        mask_chip == SPLIT_ENCODING[split_name]
+                                    )
+                                has_valid_target = False
+                                if bool(valid_region.any()):
+                                    for tname in target_names:
+                                        tchip = strips[tname][
+                                            :, :, x_px : x_px + patch_size
+                                        ]
+                                        if np.isfinite(tchip[:, valid_region]).any():
+                                            has_valid_target = True
+                                            break
+                                if not has_valid_target:
+                                    skipped_invalid_target[split_name] += 1
+                                    continue
+
                             pos = buf_pos[split_name]
                             for name in all_srcs:
                                 # Write directly into the buffer — no intermediate copy.
@@ -554,6 +577,7 @@ def chip_rasters_to_zarr(
 
                             bounds_bufs[split_name][pos] = all_bounds[row, col]
                             buf_pos[split_name] += 1
+                            written_count[split_name] += 1
                             if buf_pos[split_name] == BUFFER_SIZE:
                                 flush(split_name, BUFFER_SIZE)
                                 buf_start[split_name] += BUFFER_SIZE
@@ -564,6 +588,17 @@ def chip_rasters_to_zarr(
         for split_name in group_splits:
             if buf_pos[split_name] > 0:
                 flush(split_name, buf_pos[split_name])
+            if split_name in split_arrays:
+                n_written = int(written_count[split_name])
+                for name in all_srcs:
+                    arr = split_arrays[split_name][name]
+                    arr.resize((n_written,) + arr.shape[1:])
+                split_bounds_arrs[split_name].resize((n_written, 4))
+                if require_valid_target:
+                    console.print(
+                        f"  [bold]{split_name}[/bold]: kept {n_written:,}, "
+                        f"skipped {int(skipped_invalid_target[split_name]):,} invalid-target chips"
+                    )
 
     for srcs in all_srcs.values():
         for src in srcs:

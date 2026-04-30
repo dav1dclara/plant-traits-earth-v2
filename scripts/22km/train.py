@@ -431,19 +431,23 @@ def main(cfg: DictConfig) -> None:
                 "train/splot_loss": train_splot_loss,
                 "train/gbif_loss": train_gbif_loss,
                 "train/lr": current_lr,
-                # Backward-compatible keys (origin/dev train_chips style)
+                # Backward-compatible top-level keys (origin/dev style)
                 "val/loss": val_splot_loss,
                 "val/mean_r": float("nan")
                 if val_summary is None
                 else float(val_summary["macro_pearson_r"]),
-                # Keep current pipeline keys too
+                # Current pipeline keys
                 "val/splot_loss": val_splot_loss,
                 "val/gbif_loss": val_gbif_loss,
                 "val/selection": selection_value,
             }
+
             if val_summary is not None:
+                trait_metrics = val_summary["trait_metrics"]
                 log_dict.update(
                     {
+                        "val/macro_r2": val_summary["macro_r2"],
+                        "val/macro_pearson_r": val_summary["macro_pearson_r"],
                         "val/splot/rmse": val_summary["rmse"],
                         "val/splot/r2": val_summary["r2"],
                         "val/splot/pearson_r": val_summary["pearson_r"],
@@ -451,21 +455,20 @@ def main(cfg: DictConfig) -> None:
                         "val/splot/macro_pearson_r": val_summary["macro_pearson_r"],
                     }
                 )
-                # Exact structure used in origin/dev dashboards
-                log_dict["val/per_trait_r"] = {
-                    trait_name: float(m["pearson_r"])
-                    for trait_name, m in val_summary["trait_metrics"].items()
-                    if math.isfinite(float(m["pearson_r"]))
-                }
-                for trait_name, m in val_summary["trait_metrics"].items():
+
+                # Origin/dev dashboard structure
+                for trait_name, m in trait_metrics.items():
                     if math.isfinite(float(m["pearson_r"])):
-                        log_dict[f"val/traits/{trait_name}/pearson_r"] = float(
+                        log_dict[f"val/per_trait_r.X{trait_name}"] = float(
                             m["pearson_r"]
                         )
+
                 if improved:
                     log_dict["val/mean_r_best"] = float(val_summary["macro_pearson_r"])
+
             if is_best_loss:
                 log_dict["val/loss_best"] = best_val_loss
+
             wandb_module.log(log_dict)
 
         if es_enabled and epochs_wo_improve >= es_patience:

@@ -13,7 +13,8 @@ settings:
   # Only used with split_assignment=any_overlap
   min_split_pixels: 1
   save_all: true
-  overwrite: false
+  overwrite: true
+  require_valid_target: true
 
 data:
   predictors:

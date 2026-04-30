@@ -99,6 +99,7 @@ def main(cfg: DictConfig) -> None:
     save_all = cfg.settings.get("save_all", False)
     split_assignment = str(cfg.settings.get("split_assignment", "any_overlap"))
     min_split_pixels = int(cfg.settings.get("min_split_pixels", 1))
+    require_valid_target = bool(cfg.settings.get("require_valid_target", True))
 
     chip_rasters_to_zarr(
         predictors=predictor_paths,
@@ -110,6 +111,7 @@ def main(cfg: DictConfig) -> None:
         save_all=save_all,
         split_assignment=split_assignment,
         min_split_pixels=min_split_pixels,
+        require_valid_target=require_valid_target,
         overwrite=overwrite,
     )
 

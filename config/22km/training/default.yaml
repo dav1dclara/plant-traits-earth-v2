@@ -7,6 +7,7 @@ data:
   root_dir: /scratch3/plant-traits-v2/data/
   resolution_km: 22
   chips_dirname: chips_luca_new
+  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips_luca_new/patch7_stride3
   patch_size: 7
   stride: 3
 
