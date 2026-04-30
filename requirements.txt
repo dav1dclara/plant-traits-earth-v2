@@ -4,6 +4,7 @@ pandas
 geopandas
 numpy
 matplotlib
+cartopy
 rasterio
 zarr
 hydra-core

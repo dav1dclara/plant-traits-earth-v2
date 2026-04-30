@@ -9,7 +9,7 @@ outputs/
 data/**
 !data/**/
 !data/**/README.md
-viz/chips/
+viz/
 
 # QGIS
 qgis/
@@ -30,3 +30,4 @@ multirun/
 
 /MTL/
 analysis/
+report_*.md

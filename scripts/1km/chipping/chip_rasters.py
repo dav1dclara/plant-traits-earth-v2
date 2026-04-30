@@ -93,6 +93,7 @@ def main(cfg: DictConfig) -> None:
         stride_per_split=stride_per_split,
         h3_file=splits_file,
         save_all=cfg.settings.get("save_all", False),
+        overwrite=cfg.settings.get("overwrite", False),
         target_bands=target_bands or None,
     )
 

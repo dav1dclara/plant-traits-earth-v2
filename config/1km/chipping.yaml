@@ -6,8 +6,9 @@ paths:
 
 settings:
   patch_size: 128
-  stride: 64
-  save_all: false
+  stride: 128
+  save_all: true
+  overwrite: true
 
 data:
   predictors:
@@ -15,24 +16,24 @@ data:
       use: true
       bands: []
     modis:
-      use: true
+      use: false
       bands: []
     soilgrids:
-      use: true
+      use: false
       bands: []
     vodca:
       use: true
       bands: []
     worldclim:
-      use: true
+      use: false
       bands: []
 
   targets:
     splot:
       use: true
-      traits: []
+      traits: [1080]
       bands: [1]
     gbif:
       use: true
-      traits: []
+      traits: [1080]
       bands: [1]

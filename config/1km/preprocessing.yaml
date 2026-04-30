@@ -3,6 +3,7 @@ base_dir: "/scratch3/plant-traits-v2/data/1km"
 raw_dir: "${base_dir}/raw"
 ref_raster: "${raw_dir}/eo_data/canopy_height/ETH_GlobalCanopyHeight_2020_v1.tif"
 trait_mapping: "/scratch3/plant-traits-v2/data/trait_mapping.json"
+validity_mask: "${base_dir}/validity_mask.tif"
 
 predictors:
   parquet_file: "${raw_dir}/eo_data/eo_predict_imputed.parquet"
