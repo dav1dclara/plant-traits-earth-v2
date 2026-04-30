@@ -20,8 +20,8 @@ import numpy as np
 import zarr
 
 ZARR_PATH = "/scratch3/plant-traits-v2/data/1km/chips/patch256_stride256/"
-SPLIT = "val"
-CHIP_IDX = 217
+SPLIT = "train"
+CHIP_IDX = 1221
 PREDICTORS_TO_PLOT = []  # empty = plot all
 TARGETS_TO_PLOT = ["splot", "gbif"]  # empty = plot all
 TARGET_TRAITS_TO_PLOT = []  # empty = plot all
@@ -45,19 +45,27 @@ for arr_name, arr in sorted(pred_group.arrays()):
         panels.append((f"predictors/{arr_name}\n{file_stem}", data[band_idx]))
 
 tgt_group = z["targets"]
-# band_names is stored on the group, not on individual arrays
+# band_names is stored on the group and repeats for every source file
 band_names = tgt_group.attrs.get("band_names", [])
 for arr_name, arr in sorted(tgt_group.arrays()):
     if TARGETS_TO_PLOT and arr_name not in TARGETS_TO_PLOT:
         continue
+    files = arr.attrs.get("files", [])
+    n_bands_per_file = len(band_names) if band_names else 1
     data = arr[CHIP_IDX]  # (n_bands, H, W)
     for band_idx in range(data.shape[0]):
+        file_idx = band_idx // n_bands_per_file
+        band_in_file = band_idx % n_bands_per_file
+        trait = Path(files[file_idx]).stem if file_idx < len(files) else str(file_idx)
         band_name = (
-            band_names[band_idx] if band_idx < len(band_names) else str(band_idx)
+            band_names[band_in_file]
+            if band_in_file < len(band_names)
+            else str(band_in_file)
         )
-        if TARGET_TRAITS_TO_PLOT and band_name not in TARGET_TRAITS_TO_PLOT:
+        label = f"{trait} - {band_name}"
+        if TARGET_TRAITS_TO_PLOT and label not in TARGET_TRAITS_TO_PLOT:
             continue
-        panels.append((f"targets/{arr_name}\n{band_name}", data[band_idx]))
+        panels.append((f"targets/{arr_name}\n{label}", data[band_idx]))
 
 n = len(panels)
 ncols = min(4, n)
