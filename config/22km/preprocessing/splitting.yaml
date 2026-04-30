@@ -14,6 +14,7 @@ splitting:
   test_frac: 0.1
 
 jsd:
+  sources: [splot]  # optimize JSD using splot only (ground-truth focus)
   bands: [1]  # mean only; robust for sources with single-band targets
   n_restarts: 3000
   n_bins: 50

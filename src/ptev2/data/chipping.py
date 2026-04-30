@@ -178,6 +178,8 @@ def chip_rasters_to_zarr(
     validity_mask_file: Path | None = None,
     mask_predictors_by_split: bool = True,
     mask_targets_by_split: bool = True,
+    split_assignment: str = "any_overlap",
+    min_split_pixels: int = 1,
     overwrite: bool = False,
     target_bands: dict[str, list[int]] | None = None,
 ) -> None:
@@ -276,6 +278,14 @@ def chip_rasters_to_zarr(
         stride_groups.setdefault(_stride_all, [])
         if "all" not in stride_groups[_stride_all]:
             stride_groups[_stride_all].append("all")
+
+    valid_assignment_modes = {"center", "any_overlap"}
+    if split_assignment not in valid_assignment_modes:
+        raise ValueError(
+            f"split_assignment must be one of {sorted(valid_assignment_modes)}, got '{split_assignment}'"
+        )
+    if min_split_pixels < 1:
+        raise ValueError(f"min_split_pixels must be >= 1, got {min_split_pixels}")
 
     for stride, group_splits in stride_groups.items():
         n_cols = math.ceil((width - patch_size) / stride) + 1

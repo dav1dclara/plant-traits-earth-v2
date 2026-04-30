@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - /training: default
+  - override /models: mtl
+  - _self_
+
+train:
+  run_name: mtl

@@ -78,6 +78,18 @@ def main(cfg: DictConfig) -> None:  # Config
     n_restarts = cfg.jsd.n_restarts
     n_bins = cfg.jsd.n_bins
     random_seed = cfg.jsd.random_seed
+    jsd_sources_cfg = cfg.jsd.get("sources")
+    if jsd_sources_cfg:
+        jsd_sources = [str(s).lower() for s in jsd_sources_cfg]
+    else:
+        jsd_sources = [str(s).lower() for s in active_sources]
+    active_source_set = {str(s).lower() for s in active_sources}
+    jsd_sources = [s for s in jsd_sources if s in active_source_set]
+    if not jsd_sources:
+        raise ValueError(
+            "cfg.jsd.sources must overlap with cfg.targets.sources, got "
+            f"jsd.sources={jsd_sources_cfg}, targets.sources={active_sources}"
+        )
 
     rng = np.random.default_rng(random_seed)
 
@@ -106,6 +118,7 @@ def main(cfg: DictConfig) -> None:  # Config
 
     console.print(f"[bold]JSD optimisation settings:[/bold]")
     console.print(f"Bands for JSD:   [cyan]{bands_for_jsd}[/cyan]")
+    console.print(f"JSD sources:     [cyan]{jsd_sources}[/cyan]")
     console.print(f"Random restarts: [cyan]{n_restarts}[/cyan]")
     console.print(f"Histogram bins:  [cyan]{n_bins}[/cyan]")
     console.print(f"Random seed:     [cyan]{random_seed}[/cyan]")
@@ -173,9 +186,13 @@ def main(cfg: DictConfig) -> None:  # Config
     n_cells_all = len(all_cells)
     n_features = len(trait_names) * n_bands
     all_cell_values = [[None] * n_features for _ in range(n_cells_all)]
+    # JSD features can be computed from a subset of sources (e.g. splot only),
+    # while split coverage can still consider all active sources.
+    jsd_cell_values = [[None] * n_features for _ in range(n_cells_all)]
     for c in range(n_cells_all):
         for f in range(n_features):
             all_cell_values[c][f] = np.array([], dtype=float)
+            jsd_cell_values[c][f] = np.array([], dtype=float)
 
     extraction_jobs = [
         (src_name, trait_name, source_trait_to_raster[src_name][trait_name])
@@ -197,6 +214,10 @@ def main(cfg: DictConfig) -> None:  # Config
                 all_cell_values[c][f_idx] = np.concatenate(
                     [all_cell_values[c][f_idx], vals]
                 )
+                if str(src_name).lower() in jsd_sources:
+                    jsd_cell_values[c][f_idx] = np.concatenate(
+                        [jsd_cell_values[c][f_idx], vals]
+                    )
 
     keep = [
         any(len(all_cell_values[c][f]) > 0 for f in range(n_features))
@@ -206,6 +227,7 @@ def main(cfg: DictConfig) -> None:  # Config
     h3_cells = [cell for cell, k in zip(all_cells, keep) if k]
     polys_4326_kept = [p for p, k in zip(polys_4326, keep) if k]
     all_cell_values = [v for v, k in zip(all_cell_values, keep) if k]
+    jsd_cell_values = [v for v, k in zip(jsd_cell_values, keep) if k]
     n_cells = len(h3_cells)
     console.print(f"Cells with data: {n_cells:,} / {n_cells_all:,}")
 
@@ -231,7 +253,7 @@ def main(cfg: DictConfig) -> None:  # Config
         else set()
     )
     histograms, bin_edges = build_histograms(
-        all_cell_values, n_bins=n_bins, categorical_features=source_feature_indices
+        jsd_cell_values, n_bins=n_bins, categorical_features=source_feature_indices
     )
     valid_features = sum(1 for e in bin_edges if e is not None)
     console.print(

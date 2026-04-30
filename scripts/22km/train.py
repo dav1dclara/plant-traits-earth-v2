@@ -14,10 +14,7 @@ from rich.progress import track
 from ptev2.data.dataloader import get_dataloader
 from ptev2.metrics.evaluation import summarize_single_trait_metrics
 from ptev2.utils import (
-    apply_supervision_bundle,
-    apply_supervision_tensor,
     build_target_layout,
-    mask_bundle_targets_with_validity,
     move_bundle_to_device,
     predict_batch,
     resolve_device,
@@ -29,67 +26,24 @@ from ptev2.utils import (
 console = Console()
 
 
-def _build_loss(cfg: DictConfig):
-    """Instantiate SourceAwareLoss from config and target layout defaults."""
-    loss_cfg = OmegaConf.create(OmegaConf.to_container(cfg.train.loss, resolve=False))
-
-    alias_target = OmegaConf.select(loss_cfg, "target")
-    if alias_target is not None:
-        OmegaConf.update(loss_cfg, "_target_", alias_target, force_add=True)
-        if "target" in loss_cfg:
-            del loss_cfg["target"]
-
-    loss_target = str(OmegaConf.select(loss_cfg, "_target_") or "")
-    target_cfg = cfg.data.targets
-    if not loss_target.endswith("SourceAwareLoss"):
-        raise ValueError(
-            "Current pipeline supports only ptev2.loss.SourceAwareLoss. "
-            f"Got: {loss_target or '<missing _target_>'}"
-        )
-
-    lambda_from_loss = OmegaConf.select(loss_cfg, "lambda_gbif")
-    # Backward-compatible alias for old CLI usage: w_gbif/w_splot -> lambda_gbif ratio.
-    w_gbif = OmegaConf.select(loss_cfg, "w_gbif")
-    w_splot = OmegaConf.select(loss_cfg, "w_splot")
-    lambda_from_ratio = None
-    if w_gbif is not None and w_splot is not None and float(w_splot) > 0.0:
-        lambda_from_ratio = float(w_gbif) / float(w_splot)
-
-    return instantiate(
-        loss_cfg,
-        mode=str(OmegaConf.select(target_cfg, "mode") or "splot_only"),
-        primary_dataset=str(OmegaConf.select(target_cfg, "primary_dataset") or "splot"),
-        auxiliary_dataset=str(
-            OmegaConf.select(target_cfg, "auxiliary_dataset") or "gbif"
-        ),
-        lambda_gbif=float(
-            lambda_from_loss
-            if lambda_from_loss is not None
-            else (lambda_from_ratio if lambda_from_ratio is not None else 0.1)
-        ),
-    )
-
-
 def _resolve_selection_value(
     metric_name: str,
-    val_loss: float,
+    val_splot_loss: float,
     val_summary: dict[str, Any] | None,
 ) -> float:
-    if metric_name == "val_loss":
-        return float(val_loss)
-
+    if metric_name == "val_splot_loss":
+        return float(val_splot_loss)
     if val_summary is None:
         return float("nan")
-
     lookup = {
-        "val_splot_macro_rmse": float(val_summary["macro_rmse"]),
         "val_splot_macro_pearson": float(val_summary["macro_pearson_r"]),
+        "val_splot_macro_rmse": float(val_summary["macro_rmse"]),
         "val_splot_rmse": float(val_summary["rmse"]),
     }
     if metric_name not in lookup:
         raise ValueError(
             "Unsupported train.selection.metric='{}'".format(metric_name)
-            + ". Use val_splot_macro_rmse|val_splot_macro_pearson|val_splot_rmse|val_loss."
+            + ". Use val_splot_macro_pearson|val_splot_macro_rmse|val_splot_rmse|val_splot_loss."
         )
     return lookup[metric_name]
 
@@ -97,107 +51,75 @@ def _resolve_selection_value(
 def _is_better(current: float, best: float, mode: str, min_delta: float) -> bool:
     if not math.isfinite(current):
         return False
-    if mode == "min":
-        return current < (best - min_delta)
     if mode == "max":
         return current > (best + min_delta)
-    raise ValueError("train.selection.mode must be 'min' or 'max'.")
+    if mode == "min":
+        return current < (best - min_delta)
+    raise ValueError("train.selection.mode must be 'max' or 'min'.")
 
 
-def _prepare_batch(
-    model: torch.nn.Module,
-    X: torch.Tensor,
-    bundle: dict[str, dict[str, torch.Tensor]],
-    *,
-    device: torch.device,
-    supervision_mode: str,
-    center_crop_size: int,
-    predictor_validity_mode: str,
-    predictor_min_finite_ratio: float,
-) -> tuple[torch.Tensor, dict[str, dict[str, torch.Tensor]]]:
-    X = X.to(device, dtype=torch.float32)
-    bundle = move_bundle_to_device(bundle, device)
-
-    y_pred, valid = predict_batch(
-        model,
-        X,
-        validity_mode=predictor_validity_mode,
-        min_finite_ratio=predictor_min_finite_ratio,
-    )
-    y_pred = apply_supervision_tensor(y_pred, supervision_mode, center_crop_size)
-    valid = apply_supervision_tensor(valid, supervision_mode, center_crop_size)
-    bundle = apply_supervision_bundle(bundle, supervision_mode, center_crop_size)
-    bundle = mask_bundle_targets_with_validity(bundle, valid)
-    return y_pred, bundle
+def _center_pixel(t: torch.Tensor) -> torch.Tensor:
+    h = t.shape[-2]
+    w = t.shape[-1]
+    cy = h // 2
+    cx = w // 2
+    return t[..., cy : cy + 1, cx : cx + 1]
 
 
 @hydra.main(
     config_path="../../config/22km", config_name="training/default", version_base=None
 )
 def main(cfg: DictConfig) -> None:
-    console.rule("[bold cyan]TRAINING[/bold cyan]")
+    console.rule("[bold cyan]TRAINING 22KM[/bold cyan]")
 
-    seed_all(cfg.train.seed)
+    seed_all(int(cfg.train.seed))
 
     device = resolve_device()
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
     console.print(f"Device: [cyan]{device}[/cyan]")
 
-    console.print("[bold]\nData[/bold]")
     zarr_dir = resolve_train_zarr_dir(cfg)
     if not zarr_dir.exists():
         raise FileNotFoundError(f"Zarr directory does not exist: {zarr_dir}")
-
-    console.print(f"Resolution (km): [cyan]{cfg.data.resolution_km}[/cyan]")
-    console.print(f"Patch size: [cyan]{cfg.data.patch_size}[/cyan]")
-    console.print(f"Stride: [cyan]{cfg.data.stride}[/cyan]")
     console.print(f"Zarr directory: [cyan]{zarr_dir}[/cyan]")
 
     train_store = zarr.open_group(str(zarr_dir / "train.zarr"), mode="r")
 
-    console.print("[bold]\nPredictors:[/bold]")
     predictors = [
         name
         for name, predictor_cfg in cfg.data.predictors.items()
         if bool(predictor_cfg.use)
     ]
     if not predictors:
-        raise ValueError("No predictors enabled in cfg.training.data.predictors.")
+        raise ValueError("No predictors enabled in cfg.data.predictors.")
 
     total_pred_bands = 0
     for predictor in predictors:
         n_bands = train_store[f"predictors/{predictor}"].shape[1]
         total_pred_bands += n_bands
-        console.print(f"  - [cyan]{predictor}[/cyan] ({n_bands} bands)")
-    console.print(f"  Total: [cyan]{total_pred_bands} bands[/cyan]")
+        console.print(f"  - {predictor}: {n_bands} bands")
 
-    console.print("\n[bold]Targets:[/bold]")
     target_layout = build_target_layout(cfg, train_store)
     traits = list(target_layout["traits"])
     bands = list(target_layout["bands"])
     eval_dataset = str(target_layout["eval_dataset"])
 
-    console.print(f"Mode: [cyan]{target_layout['mode']}[/cyan]")
+    console.print(f"Targets mode: [cyan]{target_layout['mode']}[/cyan]")
     console.print(f"Train datasets: [cyan]{target_layout['active_datasets']}[/cyan]")
     console.print(f"Eval dataset: [cyan]{eval_dataset}[/cyan]")
-    console.print(f"Traits ([cyan]{len(traits)}[/cyan]):")
+    console.print(f"Traits ({len(traits)}):")
     for trait in traits:
         console.print(f"  - {trait}")
+    console.print(f"Bands: [cyan]{bands}[/cyan]")
 
-    console.print("\n[bold]Data loaders:[/bold]")
     batch_size = int(cfg.data_loaders.batch_size)
     num_workers = int(cfg.data_loaders.num_workers)
-
-    console.print(f"Batch size: [cyan]{batch_size}[/cyan]")
-    console.print(f"Num workers: [cyan]{num_workers}[/cyan]")
     train_fraction = float(OmegaConf.select(cfg, "data_loaders.train_fraction") or 1.0)
     val_fraction = float(OmegaConf.select(cfg, "data_loaders.val_fraction") or 1.0)
     subset_seed = int(
         OmegaConf.select(cfg, "data_loaders.subset_seed") or int(cfg.train.seed)
     )
-    console.print(f"Train fraction: [cyan]{train_fraction:.3f}[/cyan]")
-    console.print(f"Val fraction: [cyan]{val_fraction:.3f}[/cyan]")
 
     dataloader_cfg = {
         "zarr_dir": zarr_dir,
@@ -216,92 +138,60 @@ def main(cfg: DictConfig) -> None:
         split="val", split_fraction=val_fraction, **dataloader_cfg
     )
 
-    X_t, _ = next(iter(train_loader))
-    X_v, _ = next(iter(val_loader))
-    console.print(f"Train samples used: [cyan]{len(train_loader.dataset):,}[/cyan]")
-    console.print(f"Val samples used: [cyan]{len(val_loader.dataset):,}[/cyan]")
-    if X_t.shape[1:] != X_v.shape[1:]:
-        raise ValueError(
-            "X channel/spatial mismatch: "
-            f"train={tuple(X_t.shape[1:])} vs val={tuple(X_v.shape[1:])}"
-        )
-    console.print(f"Predictor shape (C,H,W): [cyan]{tuple(X_t.shape[1:])}[/cyan]")
+    x0, _ = next(iter(train_loader))
+    console.print(f"Predictor shape (C,H,W): [cyan]{tuple(x0.shape[1:])}[/cyan]")
+    console.print(f"Train samples: [cyan]{len(train_loader.dataset):,}[/cyan]")
+    console.print(f"Val samples: [cyan]{len(val_loader.dataset):,}[/cyan]")
 
     model_cfg = resolve_model_cfg(cfg)
     out_channels = len(traits) * len(bands)
-
-    console.print("\n[bold]Model and training configuration[/bold]")
     model = instantiate(
-        model_cfg,
-        in_channels=total_pred_bands,
-        out_channels=out_channels,
+        model_cfg, in_channels=total_pred_bands, out_channels=out_channels
     ).to(device)
 
-    init_checkpoint_path = OmegaConf.select(cfg, "train.init_checkpoint_path")
-    if init_checkpoint_path:
-        init_state = torch.load(str(init_checkpoint_path), map_location=device)
-        model_state = init_state.get("state_dict", init_state)
-        model.load_state_dict(model_state, strict=False)
-        console.print(f"Init checkpoint loaded: [cyan]{init_checkpoint_path}[/cyan]")
-
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    console.print(f"Model:         [cyan]{model_cfg._target_}[/cyan]")
-    console.print(f"  In channels:  [cyan]{total_pred_bands}[/cyan]")
-    console.print(f"  Out channels: [cyan]{out_channels}[/cyan]")
-    console.print(f"  Parameters:   [cyan]{n_params:,}[/cyan]")
+    console.print(f"Model: [cyan]{model_cfg._target_}[/cyan]")
+    console.print(f"Params: [cyan]{n_params:,}[/cyan]")
 
-    loss_fn = _build_loss(cfg)
-    if isinstance(loss_fn, torch.nn.Module):
-        loss_fn = loss_fn.to(device)
-
-    model_params = list(model.parameters())
-    loss_params = []
-    if isinstance(loss_fn, torch.nn.Module):
-        loss_params = [p for p in loss_fn.parameters() if p.requires_grad]
-
-    optimizer = instantiate(cfg.train.optimizer, params=model_params + loss_params)
+    loss_fn = instantiate(cfg.train.loss).to(device)
+    optimizer = instantiate(cfg.train.optimizer, params=list(model.parameters()))
     scheduler = instantiate(cfg.train.scheduler, optimizer=optimizer)
+
     grad_clip_norm = float(cfg.train.gradient_clip_norm)
-
-    supervision_mode = str(OmegaConf.select(cfg, "train.supervision.mode") or "dense")
-    center_crop_size = int(
-        OmegaConf.select(cfg, "train.supervision.center_crop_size") or 3
-    )
-    predictor_validity_mode = str(
-        OmegaConf.select(cfg, "train.predictor_validity.mode") or "min_fraction"
-    )
-    predictor_min_finite_ratio = float(
-        OmegaConf.select(cfg, "train.predictor_validity.min_finite_ratio") or 0.2
-    )
     selection_metric_name = str(
-        OmegaConf.select(cfg, "train.selection.metric") or "val_splot_macro_rmse"
+        OmegaConf.select(cfg, "train.selection.metric") or "val_splot_macro_pearson"
     )
-    selection_mode = str(OmegaConf.select(cfg, "train.selection.mode") or "min")
+    selection_mode = str(OmegaConf.select(cfg, "train.selection.mode") or "max")
 
-    console.print(f"Loss:                  [cyan]{loss_fn.__class__.__name__}[/cyan]")
-    console.print(f"Scheduler:             [cyan]{cfg.train.scheduler._target_}[/cyan]")
-    console.print(f"Gradient clip norm:    [cyan]{grad_clip_norm}[/cyan]")
-    console.print(
-        f"Supervision:           [cyan]{supervision_mode} (center_crop_size={center_crop_size})[/cyan]"
-    )
-    console.print(
-        "Predictor validity:    "
-        f"[cyan]{predictor_validity_mode} (min_finite_ratio={predictor_min_finite_ratio})[/cyan]"
-    )
-    console.print(
-        f"Selection metric:      [cyan]{selection_metric_name} ({selection_mode})[/cyan]"
-    )
+    primary_ds = str(OmegaConf.select(cfg, "data.targets.primary_dataset") or "splot")
+    aux_ds = str(OmegaConf.select(cfg, "data.targets.auxiliary_dataset") or "gbif")
+    w_splot = float(OmegaConf.select(cfg, "train.loss.w_splot") or 1.0)
+    w_gbif = float(OmegaConf.select(cfg, "train.loss.w_gbif") or 0.1)
 
-    early_stopping_enabled = bool(cfg.train.early_stopping.enabled)
-    early_stopping_patience = int(cfg.train.early_stopping.patience)
-    early_stopping_min_delta = float(cfg.train.early_stopping.min_delta)
+    lb_weight = float(OmegaConf.select(cfg, "mmoe.load_balance_weight") or 0.0)
+    gc_weight = float(OmegaConf.select(cfg, "mmoe.group_consistency_weight") or 0.0)
+
+    trait_group_indices: list[list[int]] | None = None
+    trait_groups_ids = OmegaConf.select(cfg, "mmoe.trait_groups", default=None)
+    if trait_groups_ids is not None:
+        trait_id_to_idx = {str(t): i for i, t in enumerate(traits)}
+        groups_mapped: list[list[int]] = []
+        for group in trait_groups_ids:
+            idxs = [
+                trait_id_to_idx[str(tid)]
+                for tid in group
+                if str(tid) in trait_id_to_idx
+            ]
+            if len(idxs) > 1:
+                groups_mapped.append(idxs)
+        trait_group_indices = groups_mapped if groups_mapped else None
 
     requested_run_name = OmegaConf.select(cfg, "train.run_name")
-    if requested_run_name is not None:
-        requested_run_name = str(requested_run_name)
     requested_run_group = OmegaConf.select(cfg, "train.group")
-    if requested_run_group is not None:
-        requested_run_group = str(requested_run_group)
+    requested_run_name = None if requested_run_name is None else str(requested_run_name)
+    requested_run_group = (
+        None if requested_run_group is None else str(requested_run_group)
+    )
 
     wandb_module = None
     if cfg.wandb.enabled:
@@ -316,124 +206,174 @@ def main(cfg: DictConfig) -> None:
             reinit=True,
         )
         run_name = requested_run_name or run.name
-        console.print(f"W&B logging enabled. Run: [cyan]{run_name}[/cyan]")
     else:
         run_name = requested_run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
-        console.print("[yellow]W&B logging disabled.[/yellow]")
 
     checkpoint_dir = Path(cfg.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    best_checkpoint_path = checkpoint_dir / f"{run_name}.pth"
-    config_path = checkpoint_dir / f"{run_name}.yaml"
-    OmegaConf.save(cfg, config_path)
+    best_path = checkpoint_dir / f"{run_name}.pth"
+    OmegaConf.save(cfg, checkpoint_dir / f"{run_name}.yaml")
 
     best_selection = float("inf") if selection_mode == "min" else float("-inf")
     best_epoch = -1
+    epochs_wo_improve = 0
+    best_val_mean_r = float("-inf")
     best_val_loss = float("inf")
-    epochs_without_improvement = 0
+
+    es_enabled = bool(cfg.train.early_stopping.enabled)
+    es_patience = int(cfg.train.early_stopping.patience)
+    es_min_delta = float(cfg.train.early_stopping.min_delta)
 
     for epoch in range(int(cfg.train.epochs)):
         console.rule(f"Epoch {epoch + 1}/{cfg.train.epochs}")
 
         model.train()
-        train_num_total = 0.0
-        train_den_total = 0.0
+        train_splot_num = train_splot_den = 0.0
+        train_gbif_num = train_gbif_den = 0.0
 
         for X, bundle in track(train_loader, description="Training"):
-            y_pred, bundle = _prepare_batch(
-                model,
-                X,
-                bundle,
-                device=device,
-                supervision_mode=supervision_mode,
-                center_crop_size=center_crop_size,
-                predictor_validity_mode=predictor_validity_mode,
-                predictor_min_finite_ratio=predictor_min_finite_ratio,
+            X = X.to(device, dtype=torch.float32)
+            bundle = move_bundle_to_device(bundle, device)
+            y_pred, valid_x = predict_batch(
+                model, X, validity_mode="min_fraction", min_finite_ratio=0.2
             )
 
-            if not torch.isfinite(y_pred).all():
+            p_payload = bundle.get(primary_ds)
+            a_payload = bundle.get(aux_ds)
+            if p_payload is None or a_payload is None:
+                raise ValueError("Missing primary/aux dataset payload.")
+
+            # mask targets where predictors are invalid
+            p_y = torch.where(
+                valid_x.expand_as(p_payload["y"]), p_payload["y"], torch.nan
+            )
+            a_y = torch.where(
+                valid_x.expand_as(a_payload["y"]), a_payload["y"], torch.nan
+            )
+
+            p_num, p_den = loss_fn.loss_components(
+                y_pred, p_y, p_payload["source_mask"]
+            )
+            a_num, a_den = loss_fn.loss_components(
+                y_pred, a_y, a_payload["source_mask"]
+            )
+
+            zero = y_pred.sum() * 0.0
+            p_loss = p_num / p_den if bool((p_den > 0).item()) else zero
+            a_loss = a_num / a_den if bool((a_den > 0).item()) else zero
+            loss = w_splot * p_loss + w_gbif * a_loss
+
+            if lb_weight > 0 and hasattr(model, "get_load_balancing_loss"):
+                lb = model.get_load_balancing_loss()
+                if torch.isfinite(lb):
+                    loss = loss + lb_weight * lb
+
+            if (
+                gc_weight > 0
+                and trait_group_indices
+                and hasattr(model, "get_group_consistency_loss")
+            ):
+                gc = model.get_group_consistency_loss(trait_group_indices)
+                if torch.isfinite(gc):
+                    loss = loss + gc_weight * gc
+
+            if not torch.isfinite(loss):
                 continue
 
             optimizer.zero_grad(set_to_none=True)
-            batch_num, batch_den, _ = loss_fn.loss_components(y_pred, bundle, None)
-            if (
-                not torch.isfinite(batch_num)
-                or not torch.isfinite(batch_den)
-                or batch_den <= 0.0
-            ):
-                continue
-
-            loss = batch_num / batch_den
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
             optimizer.step()
 
-            train_num_total += batch_num.detach().item()
-            train_den_total += batch_den.detach().item()
+            if bool((p_den > 0).item()):
+                train_splot_num += p_num.detach().item()
+                train_splot_den += p_den.detach().item()
+            if bool((a_den > 0).item()):
+                train_gbif_num += a_num.detach().item()
+                train_gbif_den += a_den.detach().item()
 
-        current_lr = float(optimizer.param_groups[0]["lr"])
-        train_loss_avg = (
-            train_num_total / train_den_total if train_den_total > 0.0 else float("nan")
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            pass
+        else:
+            scheduler.step()
+
+        train_splot_loss = (
+            train_splot_num / train_splot_den if train_splot_den > 0 else float("nan")
         )
-        console.print(f"  train_loss={train_loss_avg:.6f}")
+        train_gbif_loss = (
+            train_gbif_num / train_gbif_den if train_gbif_den > 0 else float("nan")
+        )
 
         model.eval()
-        val_num_total = 0.0
-        val_den_total = 0.0
+        val_splot_num = val_splot_den = 0.0
+        val_gbif_num = val_gbif_den = 0.0
         val_y_true_parts = []
         val_y_pred_parts = []
         val_valid_parts = []
 
         with torch.no_grad():
             for X, bundle in track(val_loader, description="Validation"):
-                y_pred, bundle = _prepare_batch(
-                    model,
-                    X,
-                    bundle,
-                    device=device,
-                    supervision_mode=supervision_mode,
-                    center_crop_size=center_crop_size,
-                    predictor_validity_mode=predictor_validity_mode,
-                    predictor_min_finite_ratio=predictor_min_finite_ratio,
+                X = X.to(device, dtype=torch.float32)
+                bundle = move_bundle_to_device(bundle, device)
+                y_pred, valid_x = predict_batch(
+                    model, X, validity_mode="min_fraction", min_finite_ratio=0.2
                 )
 
-                if not torch.isfinite(y_pred).all():
-                    continue
+                p_payload = bundle.get(primary_ds)
+                a_payload = bundle.get(aux_ds)
+                if p_payload is None or a_payload is None:
+                    raise ValueError("Missing primary/aux dataset payload.")
 
-                batch_num, batch_den, _ = loss_fn.loss_components(y_pred, bundle, None)
-                if (
-                    torch.isfinite(batch_num)
-                    and torch.isfinite(batch_den)
-                    and batch_den > 0.0
-                ):
-                    val_num_total += batch_num.item()
-                    val_den_total += batch_den.item()
+                p_y = torch.where(
+                    valid_x.expand_as(p_payload["y"]), p_payload["y"], torch.nan
+                )
+                a_y = torch.where(
+                    valid_x.expand_as(a_payload["y"]), a_payload["y"], torch.nan
+                )
+
+                p_num, p_den = loss_fn.loss_components(
+                    y_pred, p_y, p_payload["source_mask"]
+                )
+                a_num, a_den = loss_fn.loss_components(
+                    y_pred, a_y, a_payload["source_mask"]
+                )
+
+                if bool((p_den > 0).item()):
+                    val_splot_num += p_num.item()
+                    val_splot_den += p_den.item()
+                if bool((a_den > 0).item()):
+                    val_gbif_num += a_num.item()
+                    val_gbif_den += a_den.item()
 
                 eval_payload = bundle.get(eval_dataset)
                 if eval_payload is None:
                     continue
 
-                y_eval = eval_payload["y"]
-                src_eval = eval_payload["source_mask"]
+                # train_chips-like validation logic: center pixel Pearson-R on SPLOT
+                y_eval_c = _center_pixel(eval_payload["y"])
+                src_eval_c = _center_pixel(eval_payload["source_mask"])
+                y_pred_c = _center_pixel(y_pred)
                 valid_eval = (
-                    torch.isfinite(y_eval) & torch.isfinite(y_pred) & (src_eval > 0)
+                    torch.isfinite(y_eval_c)
+                    & torch.isfinite(y_pred_c)
+                    & (src_eval_c > 0)
+                    & _center_pixel(valid_x).expand_as(y_eval_c)
                 )
+                if bool(valid_eval.any()):
+                    val_y_true_parts.append(y_eval_c.detach().cpu())
+                    val_y_pred_parts.append(y_pred_c.detach().cpu())
+                    val_valid_parts.append(valid_eval.detach().cpu())
 
-                if not bool(valid_eval.any()):
-                    continue
-
-                val_y_true_parts.append(y_eval.detach().cpu())
-                val_y_pred_parts.append(y_pred.detach().cpu())
-                val_valid_parts.append(valid_eval.detach().cpu())
-
-        val_loss_avg = (
-            val_num_total / val_den_total if val_den_total > 0.0 else float("nan")
+        val_splot_loss = (
+            val_splot_num / val_splot_den if val_splot_den > 0 else float("nan")
         )
-        console.print(f"  val_loss={val_loss_avg:.6f}")
+        val_gbif_loss = (
+            val_gbif_num / val_gbif_den if val_gbif_den > 0 else float("nan")
+        )
 
-        val_metric_summary = None
+        val_summary = None
         if val_y_true_parts:
-            val_metric_summary = summarize_single_trait_metrics(
+            val_summary = summarize_single_trait_metrics(
                 y_true=torch.cat(val_y_true_parts, dim=0),
                 y_pred=torch.cat(val_y_pred_parts, dim=0),
                 source_mask=None,
@@ -441,83 +381,96 @@ def main(cfg: DictConfig) -> None:
                 trait_names=traits,
                 n_bands=len(bands),
             )
-            console.print(
-                "  val_splot_rmse={rmse:.6f}  val_splot_macro_rmse={macro_rmse:.6f}  "
-                "val_splot_macro_pearson={macro_pearson_r:.6f}".format(
-                    rmse=val_metric_summary["rmse"],
-                    macro_rmse=val_metric_summary["macro_rmse"],
-                    macro_pearson_r=val_metric_summary["macro_pearson_r"],
-                )
-            )
 
         selection_value = _resolve_selection_value(
-            selection_metric_name,
-            val_loss_avg,
-            val_metric_summary,
-        )
-        is_best = _is_better(
-            selection_value, best_selection, selection_mode, early_stopping_min_delta
+            selection_metric_name, val_splot_loss, val_summary
         )
 
-        if is_best:
+        improved = _is_better(
+            selection_value, best_selection, selection_mode, es_min_delta
+        )
+        is_best_loss = math.isfinite(val_splot_loss) and (
+            val_splot_loss < best_val_loss - es_min_delta
+        )
+        if improved:
             best_selection = selection_value
-            best_val_loss = val_loss_avg
             best_epoch = epoch + 1
-            epochs_without_improvement = 0
+            epochs_wo_improve = 0
             torch.save(
                 {
                     "epoch": best_epoch,
                     "state_dict": model.state_dict(),
-                    "val_loss": best_val_loss,
                     "selection_metric": selection_metric_name,
                     "selection_value": best_selection,
-                    "in_channels": total_pred_bands,
-                    "out_channels": out_channels,
                     "config": OmegaConf.to_container(cfg, resolve=True),
-                    "wandb_run_id": getattr(run, "id", None)
-                    if cfg.wandb.enabled
-                    else None,
                 },
-                best_checkpoint_path,
-            )
-            console.print(
-                f"[green]New best model saved[/green] ({selection_metric_name}={best_selection:.6f})"
+                best_path,
             )
         else:
-            epochs_without_improvement += 1
+            epochs_wo_improve += 1
 
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(selection_value)
-        else:
-            scheduler.step()
-
-        if cfg.wandb.enabled:
-            log_dict = {
-                "epoch": epoch + 1,
-                "train/loss": train_loss_avg,
-                "val/loss": val_loss_avg,
-                "train/lr": current_lr,
-                "val/selection_metric_name": selection_metric_name,
-                "val/selection_metric_value": selection_value,
-            }
-            if val_metric_summary is not None:
-                log_dict["val/splot/rmse"] = val_metric_summary["rmse"]
-                log_dict["val/splot/r2"] = val_metric_summary["r2"]
-                log_dict["val/splot/pearson_r"] = val_metric_summary["pearson_r"]
-                log_dict["val/splot/macro_rmse"] = val_metric_summary["macro_rmse"]
-                log_dict["val/splot/macro_pearson_r"] = val_metric_summary[
-                    "macro_pearson_r"
-                ]
-            if wandb_module is not None:
-                wandb_module.log(log_dict)
-
-        if (
-            early_stopping_enabled
-            and epochs_without_improvement >= early_stopping_patience
+        if val_summary is not None and math.isfinite(
+            float(val_summary["macro_pearson_r"])
         ):
+            best_val_mean_r = max(
+                best_val_mean_r, float(val_summary["macro_pearson_r"])
+            )
+        if is_best_loss:
+            best_val_loss = float(val_splot_loss)
+
+        current_lr = float(optimizer.param_groups[0]["lr"])
+        console.print(
+            f"train_splot_loss={train_splot_loss:.5f} train_gbif_loss={train_gbif_loss:.5f} "
+            f"val_splot_loss={val_splot_loss:.5f} val_gbif_loss={val_gbif_loss:.5f} "
+            f"sel={selection_value:.5f} lr={current_lr:.2e}"
+        )
+
+        if cfg.wandb.enabled and wandb_module is not None:
+            log_dict: dict[str, Any] = {
+                "epoch": epoch + 1,
+                "train/splot_loss": train_splot_loss,
+                "train/gbif_loss": train_gbif_loss,
+                "train/lr": current_lr,
+                # Backward-compatible keys (origin/dev train_chips style)
+                "val/loss": val_splot_loss,
+                "val/mean_r": float("nan")
+                if val_summary is None
+                else float(val_summary["macro_pearson_r"]),
+                # Keep current pipeline keys too
+                "val/splot_loss": val_splot_loss,
+                "val/gbif_loss": val_gbif_loss,
+                "val/selection": selection_value,
+            }
+            if val_summary is not None:
+                log_dict.update(
+                    {
+                        "val/splot/rmse": val_summary["rmse"],
+                        "val/splot/r2": val_summary["r2"],
+                        "val/splot/pearson_r": val_summary["pearson_r"],
+                        "val/splot/macro_rmse": val_summary["macro_rmse"],
+                        "val/splot/macro_pearson_r": val_summary["macro_pearson_r"],
+                    }
+                )
+                # Exact structure used in origin/dev dashboards
+                log_dict["val/per_trait_r"] = {
+                    trait_name: float(m["pearson_r"])
+                    for trait_name, m in val_summary["trait_metrics"].items()
+                    if math.isfinite(float(m["pearson_r"]))
+                }
+                for trait_name, m in val_summary["trait_metrics"].items():
+                    if math.isfinite(float(m["pearson_r"])):
+                        log_dict[f"val/traits/{trait_name}/pearson_r"] = float(
+                            m["pearson_r"]
+                        )
+                if improved:
+                    log_dict["val/mean_r_best"] = float(val_summary["macro_pearson_r"])
+            if is_best_loss:
+                log_dict["val/loss_best"] = best_val_loss
+            wandb_module.log(log_dict)
+
+        if es_enabled and epochs_wo_improve >= es_patience:
             console.print(
-                "[yellow]Early stopping triggered[/yellow] "
-                f"(patience={early_stopping_patience}, best_epoch={best_epoch})"
+                f"[yellow]Early stopping[/yellow] (patience={es_patience}, best_epoch={best_epoch})"
             )
             break
 
@@ -525,16 +478,19 @@ def main(cfg: DictConfig) -> None:
     console.print(
         f"Best {selection_metric_name}={best_selection:.6f} at epoch {best_epoch}"
     )
-    console.print(f"Checkpoint: [cyan]{best_checkpoint_path}[/cyan]")
+    console.print(f"Checkpoint: [cyan]{best_path}[/cyan]")
 
-    if cfg.wandb.enabled:
+    if cfg.wandb.enabled and wandb_module is not None:
         run.summary["best_selection_metric_name"] = selection_metric_name
         run.summary["best_selection_metric_value"] = float(best_selection)
+        run.summary["best_epoch"] = int(best_epoch)
+        run.summary["checkpoint_path"] = str(best_path)
+        run.summary["best_val_mean_r"] = (
+            float(best_val_mean_r) if math.isfinite(best_val_mean_r) else None
+        )
         run.summary["best_val_loss"] = (
             float(best_val_loss) if math.isfinite(best_val_loss) else None
         )
-        run.summary["best_epoch"] = int(best_epoch)
-        run.summary["checkpoint_path"] = str(best_checkpoint_path)
         run.finish()
 
 

@@ -2,11 +2,16 @@ paths:
   predictors_dir: /scratch3/plant-traits-v2/data/22km/eo_data_processed/
   targets_dir: /scratch3/plant-traits-v2/data/22km/targets/
   splits_file: /scratch3/plant-traits-v2/data/22km/splits/h3_splits_res1_comb_22km.gpkg
-  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips_luca/
+  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips_luca_new/
 
 settings:
   patch_size: 7
   stride: 3
+  # center: assign chip to split by center pixel only (old behavior)
+  # any_overlap: assign chip to each split it overlaps (recommended, leakage-safe via masking)
+  split_assignment: any_overlap
+  # Only used with split_assignment=any_overlap
+  min_split_pixels: 1
   save_all: true
   overwrite: false
 
