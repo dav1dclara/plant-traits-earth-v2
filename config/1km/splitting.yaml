@@ -1,4 +1,5 @@
 data_dir: "/scratch3/plant-traits-v2/data/"
+validity_mask: "${data_dir}1km/validity_mask.tif"
 
 targets:
   resolution_km: 1

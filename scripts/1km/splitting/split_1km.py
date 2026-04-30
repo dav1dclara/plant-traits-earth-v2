@@ -1,9 +1,10 @@
 """
-Create a train/val/test split for all traits at 1km resolution.
+Create a train/val/test/none split for all traits at 1km resolution.
 
 - H3 cells with splot data: JSD-optimised assignment to train/val/test
 - H3 cells with gbif data only: randomly assigned to train/val (never test)
-- H3 cells with no data: discarded
+- H3 cells with valid predictor data but no labels: assigned to "none"
+- H3 cells with no data at all: discarded
 """
 
 from pathlib import Path
@@ -217,6 +218,34 @@ def main(cfg: DictConfig) -> None:
     gbif_splits = list(rng.permutation(gbif_base))
     console.print(f"GBIF-only cells → train={n_train_gbif}  val={n_val_gbif}")
 
+    # Predictor-only cells: no splot or GBIF labels, but valid predictor data
+    console.print("\n[bold]Identifying predictor-only cells[/bold]")
+    validity_mask_path = Path(cfg.validity_mask)
+    labeled_set = set(splot_indices) | set(gbif_only_indices)
+    no_label_indices = [c for c in range(n_cells_all) if c not in labeled_set]
+    console.print(f"H3 cells with no labels: {len(no_label_indices):,}")
+
+    predict_indices: list[int] = []
+    if validity_mask_path.exists():
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            valid_counts = count_valid_pixels_per_raster(
+                [validity_mask_path], 1, cell_index, n_cells_all, progress=progress
+            )
+        predict_indices = [c for c in no_label_indices if valid_counts[c, 0] > 0]
+        console.print(
+            f"Cells with valid predictor data: [cyan]{len(predict_indices):,}[/cyan] → split='none'"
+        )
+    else:
+        console.print(
+            f"[yellow]Validity mask not found at {validity_mask_path} — skipping predict cells.[/yellow]\n"
+            "[yellow]Run scripts/1km/preprocessing/build_validity_mask.py first.[/yellow]"
+        )
+
     # JSD optimisation: splot counts back-solved to hit global train/val/test targets
     console.print("\n[bold]Optimising split assignment[/bold]")
     n_total = n_splot + n_gbif
@@ -242,18 +271,26 @@ def main(cfg: DictConfig) -> None:
     # Assemble output GeoDataFrame
     console.print("\n[bold]Saving split GeoPackage[/bold]")
 
-    h3_cells_out = [all_cells[c] for c in splot_indices] + [
-        all_cells[c] for c in gbif_only_indices
-    ]
-    polys_out = [polys_4326[c] for c in splot_indices] + [
-        polys_4326[c] for c in gbif_only_indices
-    ]
-    splits_out = splot_splits + gbif_splits
-    source_out = ["splot"] * n_splot + ["gbif_only"] * n_gbif
-    n_traits_out = splot_n_traits_obs + [0] * n_gbif
+    h3_cells_out = (
+        [all_cells[c] for c in splot_indices]
+        + [all_cells[c] for c in gbif_only_indices]
+        + [all_cells[c] for c in predict_indices]
+    )
+    polys_out = (
+        [polys_4326[c] for c in splot_indices]
+        + [polys_4326[c] for c in gbif_only_indices]
+        + [polys_4326[c] for c in predict_indices]
+    )
+    splits_out = splot_splits + gbif_splits + ["none"] * len(predict_indices)
+    source_out = (
+        ["splot"] * n_splot
+        + ["gbif_only"] * n_gbif
+        + ["predictor_only"] * len(predict_indices)
+    )
+    n_traits_out = splot_n_traits_obs + [0] * n_gbif + [0] * len(predict_indices)
 
     # Per-trait pixel counts for every output cell
-    cells_out = splot_indices + list(gbif_only_indices)
+    cells_out = splot_indices + list(gbif_only_indices) + predict_indices
     per_trait_counts = {}
     for i, raster in enumerate(splot_rasters):
         col = splot_pixel_counts[cells_out, i].tolist()
@@ -276,17 +313,23 @@ def main(cfg: DictConfig) -> None:
 
     console.rule("[bold]Summary[/bold]")
     n_total = len(gdf)
-    for source in ["splot", "gbif_only"]:
+    for source, splits in [
+        ("splot", ["train", "val", "test"]),
+        ("gbif_only", ["train", "val"]),
+        ("predictor_only", ["none"]),
+    ]:
         sub = gdf[gdf["data_source"] == source]
+        if len(sub) == 0:
+            continue
         console.print(f"[bold]{source}[/bold]: {len(sub):,} cells")
-        for split in ["train", "val", "test"]:
+        for split in splits:
             n = (sub["split"] == split).sum()
-            pct = n / len(sub) if len(sub) > 0 else 0
-            console.print(f"  {split:5s}: {n:>5,} cells  ({pct:.1%})")
+            console.print(f"  {split:8s}: {n:>5,} cells  ({n / len(sub):.1%})")
     console.print(f"[bold]Total:[/bold] {n_total:,} cells")
-    for split in ["train", "val", "test"]:
+    for split in ["train", "val", "test", "none"]:
         n = (gdf["split"] == split).sum()
-        console.print(f"  {split:5s}: {n:>5,} cells  ({n / n_total:.1%})")
+        if n > 0:
+            console.print(f"  {split:8s}: {n:>5,} cells  ({n / n_total:.1%})")
 
 
 if __name__ == "__main__":

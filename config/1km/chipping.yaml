@@ -5,9 +5,10 @@ paths:
   zarr_dir: /scratch3/plant-traits-v2/data/1km/chips/
 
 settings:
-  patch_size: 128
-  stride: 128
-  save_all: false
+  patch_size: 256
+  stride: 256
+  save_all: true
+  overwrite: true
 
 data:
   predictors:
@@ -30,9 +31,9 @@ data:
   targets:
     splot:
       use: true
-      traits: [13]
+      traits: [1080]
       bands: [1]
     gbif:
       use: true
-      traits: [13]
+      traits: [1080]
       bands: [1]
