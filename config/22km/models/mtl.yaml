@@ -1,6 +1,9 @@
+# Active MTL model (single source of truth).
 _target_: ptev2.models.multitask.MTLModel
-base_channels: 32
+pca_n_components: null
+base_channels: 48
 norm: gn
 gn_groups: 8
 stride_blocks: [1, 1, 1, 1]
-dropout_p: 0.2
+dropout_p: 0.1
+per_trait_conv: true

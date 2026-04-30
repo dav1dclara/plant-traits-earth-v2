@@ -1,11 +1,7 @@
 defaults:
   - paths: default
-  - models: default
   - training: default
-  - evaluation: default
-  - prediction: default
   - test: default
-  - wandb: default
   - _self_
 
 hydra:

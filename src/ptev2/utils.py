@@ -62,12 +62,12 @@ def build_target_layout(
 
     if target_mode == "splot_only":
         active_datasets = [primary_dataset]
-    elif target_mode == "source_aware_comb_single_head":
+    elif target_mode in {"dual_source_comb_single_head", "dual_source_single_head"}:
         active_datasets = [primary_dataset, auxiliary_dataset]
     else:
         raise ValueError(
             f"Unsupported data.targets.mode='{target_mode}'. "
-            "Use one of ['splot_only', 'source_aware_comb_single_head']."
+            "Use one of ['splot_only', 'dual_source_single_head', 'dual_source_comb_single_head']."
         )
 
     zarr_dataset_names = list(train_store["targets"].keys())
@@ -143,15 +143,6 @@ def build_target_layout(
             "target_indices": target_indices,
             "source_indices": source_indices,
         }
-
-    if primary_dataset in dataset_layouts and auxiliary_dataset in dataset_layouts:
-        primary_traits = dataset_layouts[primary_dataset]["all_traits"]
-        auxiliary_traits = dataset_layouts[auxiliary_dataset]["all_traits"]
-        if primary_traits != auxiliary_traits:
-            raise ValueError(
-                "Trait order mismatch between primary and auxiliary targets. "
-                "Expected exact alignment across sources."
-            )
 
     return {
         "mode": target_mode,

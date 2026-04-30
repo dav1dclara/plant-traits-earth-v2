@@ -148,6 +148,8 @@ def chip_rasters_to_zarr(
     stride_all: int | None = None,
     mask_predictors_by_split: bool = True,
     mask_targets_by_split: bool = True,
+    split_assignment: str = "any_overlap",
+    min_split_pixels: int = 1,
     overwrite: bool = False,
 ) -> None:
     """Chip predictor and target rasters into one zarr store per split.
@@ -226,6 +228,14 @@ def chip_rasters_to_zarr(
         if "all" not in stride_groups[_stride_all]:
             stride_groups[_stride_all].append("all")
 
+    valid_assignment_modes = {"center", "any_overlap"}
+    if split_assignment not in valid_assignment_modes:
+        raise ValueError(
+            f"split_assignment must be one of {sorted(valid_assignment_modes)}, got '{split_assignment}'"
+        )
+    if min_split_pixels < 1:
+        raise ValueError(f"min_split_pixels must be >= 1, got {min_split_pixels}")
+
     for stride, group_splits in stride_groups.items():
         n_cols = math.ceil((width - patch_size) / stride) + 1
         n_rows = math.ceil((height - patch_size) / stride) + 1
@@ -247,8 +257,17 @@ def chip_rasters_to_zarr(
                     y_px:y_end, x_px:x_end
                 ]
                 center_code = int(mask_chip[center_row, center_col])
-                if center_code in group_codes:
-                    n_chips_per[code_to_name[center_code]] += 1
+                if split_assignment == "center":
+                    if center_code in group_codes:
+                        n_chips_per[code_to_name[center_code]] += 1
+                else:
+                    for split_name in named_splits:
+                        split_code = SPLIT_ENCODING[split_name]
+                        if (
+                            int(np.count_nonzero(mask_chip == split_code))
+                            >= min_split_pixels
+                        ):
+                            n_chips_per[split_name] += 1
                 unique_codes = np.unique(mask_chip)
                 if "all" in group_splits and any(c >= 0 for c in unique_codes):
                     n_chips_per["all"] += 1
@@ -357,8 +376,17 @@ def chip_rasters_to_zarr(
                     center_code = int(mask_chip[center_row, center_col])
                     unique_codes = np.unique(mask_chip)
                     chip_splits = []
-                    if center_code in group_codes:
-                        chip_splits.append(code_to_name[center_code])
+                    if split_assignment == "center":
+                        if center_code in group_codes:
+                            chip_splits.append(code_to_name[center_code])
+                    else:
+                        for split_name in named_splits:
+                            split_code = SPLIT_ENCODING[split_name]
+                            if (
+                                int(np.count_nonzero(mask_chip == split_code))
+                                >= min_split_pixels
+                            ):
+                                chip_splits.append(split_name)
                     has_any_valid = any(c >= 0 for c in unique_codes)
                     if "all" in group_splits and has_any_valid:
                         chip_splits.append("all")

@@ -1,14 +1,8 @@
-_target_: ptev2.models.traitPatchCNN.ResPatchCNN
-base_channels: 32
-head_depth: 2
-norm: "gn"
+# Active STL model (single source of truth).
+_target_: ptev2.models.multitask.STLModel
+base_channels: 48
+norm: gn
 gn_groups: 8
-# For patch 7x7 center-supervision we keep spatial resolution
-# and grow receptive field via dilation in deeper blocks.
 stride_blocks: [1, 1, 1, 1]
-encoder_dilations: [1, 1, 2, 2]
-activation: "silu"
-use_stem: true
-stem_kernel_size: 3
-output_mode: "upsample_to_input"
-dropout_p: 0.2
+dropout_p: 0.1
+pca_n_components: null

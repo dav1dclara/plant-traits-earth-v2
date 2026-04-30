@@ -15,17 +15,17 @@
 Example commands:
 
 ```bash
-python scripts/train.py train.seed=0 train.epochs=50 train.early_stopping.enabled=true
-python scripts/train.py train.seed=1 train.epochs=50 train.early_stopping.enabled=true
-python scripts/train.py train.seed=2 train.epochs=50 train.early_stopping.enabled=true
-python scripts/train.py train.seed=3 train.epochs=50 train.early_stopping.enabled=true
-python scripts/train.py train.seed=4 train.epochs=50 train.early_stopping.enabled=true
+python scripts/22km/train.py train.seed=0 train.epochs=50 train.early_stopping.enabled=true
+python scripts/22km/train.py train.seed=1 train.epochs=50 train.early_stopping.enabled=true
+python scripts/22km/train.py train.seed=2 train.epochs=50 train.early_stopping.enabled=true
+python scripts/22km/train.py train.seed=3 train.epochs=50 train.early_stopping.enabled=true
+python scripts/22km/train.py train.seed=4 train.epochs=50 train.early_stopping.enabled=true
 ```
 
 ## 2) Basic HPO
 
 - Sweep config: `config/hpo/basic_sweep.yaml`.
-- Training entry point stays: `scripts/train.py`.
+- Training entry point: `scripts/22km/train.py`.
 - Important integration detail:
   - Sweep uses `${args_no_hyphens}` so Hydra overrides are passed as `key=value`.
 

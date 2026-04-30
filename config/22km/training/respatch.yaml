@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - /training: default
+  - override /models: respatch
+  - _self_
+
+train:
+  run_name: respatch

@@ -1,4 +1,4 @@
-program: scripts/train.py
+program: scripts/22km/train.py
 entity: plant-traits-v2
 project: Project_PTV2
 method: bayes
@@ -9,8 +9,8 @@ command:
   - ${program}
   - ${args_no_hyphens}
 metric:
-  name: val/rmse
-  goal: minimize
+  name: val/selection_metric_value
+  goal: maximize
 early_terminate:
   type: hyperband
   min_iter: 5
@@ -20,6 +20,10 @@ parameters:
     value: 0
   train.epochs:
     value: 35
+  train.selection.metric:
+    value: val_splot_macro_pearson
+  train.selection.mode:
+    value: max
   train.early_stopping.enabled:
     value: true
   train.early_stopping.patience:

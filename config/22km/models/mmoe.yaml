@@ -1,10 +1,13 @@
-_target_: ptev2.models.multitask.MMoEModel
-base_channels: 32
+# Active MMoE model (single source of truth).
+_target_: ptev2.models.multitask.GatedMMoEModelV3
+pca_n_components: null
+base_channels: 48
 norm: gn
 gn_groups: 8
 stride_blocks: [1, 1, 1, 1]
-dropout_p: 0.2
-n_experts: 6
-expert_hidden: 192
-gate_temperature: 0.5
+dropout_p: 0.1
+n_experts: 8
+expert_hidden: 96
+gate_temperature: 0.8
 gate_top_k: 2
+residual_scale: 0.0
