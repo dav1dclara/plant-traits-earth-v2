@@ -45,8 +45,8 @@ train:
   epochs: 15
 
   optimizer:
-    _target_: torch.optim.Adam
-    lr: 2e-4
+    _target_: torch.optim.AdamW
+    lr: 1e-4
     weight_decay: 1e-5
 
   loss:
@@ -58,7 +58,7 @@ train:
 
   scheduler:
     _target_: torch.optim.lr_scheduler.StepLR
-    step_size: 15
+    step_size: 5
     gamma: 0.7
 
   supervision:
@@ -72,6 +72,12 @@ train:
   source_weights:
     splot: 1.0
     gbif: 0.1
+
+  sampling:
+    splot_balanced: true
+    positive_dataset: splot
+    positive_fraction: 0.5
+    replacement: true
 
   eval_dataset: splot
 

@@ -11,6 +11,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 from rich.progress import track
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from ptev2.data.dataloader import get_dataloader
 from ptev2.metrics.evaluation import summarize_single_trait_metrics
@@ -118,6 +119,80 @@ def _prepare_supervised_batch(
     return y_pred, valid_x, bundle
 
 
+def _build_splot_balanced_sampler(
+    *,
+    dataset,
+    positive_dataset: str,
+    positive_fraction: float,
+    replacement: bool,
+    seed: int,
+) -> WeightedRandomSampler | None:
+    layout = dataset.target_layouts.get(positive_dataset)
+    if layout is None:
+        console.print(
+            f"[yellow]Sampling balance disabled: dataset '{positive_dataset}' is unavailable.[/yellow]"
+        )
+        return None
+
+    target_arr = dataset.store[f"targets/{positive_dataset}"]
+    source_indices = list(layout.get("source_indices") or [])
+    target_indices = list(layout.get("target_indices") or [])
+    chip_indices = np.asarray(dataset.chip_indices, dtype=np.int64)
+    n_samples = int(chip_indices.shape[0])
+
+    if n_samples == 0:
+        return None
+
+    positive_mask = np.zeros(n_samples, dtype=bool)
+    chunk_size = 1024
+    for start in range(0, n_samples, chunk_size):
+        stop = min(start + chunk_size, n_samples)
+        idx = chip_indices[start:stop]
+        y_full = np.asarray(target_arr[idx], dtype=np.float32)
+        if source_indices:
+            block = y_full[:, source_indices, :, :]
+            valid = np.isfinite(block) & (block > 0)
+        else:
+            block = y_full[:, target_indices, :, :]
+            valid = np.isfinite(block)
+        positive_mask[start:stop] = valid.reshape(stop - start, -1).any(axis=1)
+
+    n_pos = int(positive_mask.sum())
+    n_neg = int(n_samples - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        console.print(
+            "[yellow]Sampling balance disabled: positive/negative split is degenerate "
+            f"(n_pos={n_pos}, n_neg={n_neg}).[/yellow]"
+        )
+        return None
+
+    pos_fraction = float(positive_fraction)
+    if pos_fraction <= 0.0 or pos_fraction >= 1.0:
+        raise ValueError(
+            f"train.sampling.positive_fraction must be in (0,1), got {pos_fraction}."
+        )
+
+    weight_pos = pos_fraction / n_pos
+    weight_neg = (1.0 - pos_fraction) / n_neg
+    weights = np.where(positive_mask, weight_pos, weight_neg).astype(np.float64)
+
+    console.print(
+        "Train sampler balance: "
+        f"dataset={positive_dataset} "
+        f"n_pos={n_pos:,} n_neg={n_neg:,} "
+        f"target_pos_fraction={pos_fraction:.2f}"
+    )
+
+    gen = torch.Generator()
+    gen.manual_seed(int(seed))
+    return WeightedRandomSampler(
+        weights=torch.from_numpy(weights),
+        num_samples=n_samples,
+        replacement=bool(replacement),
+        generator=gen,
+    )
+
+
 @hydra.main(
     config_path="../../config/22km", config_name="training/default", version_base=None
 )
@@ -189,6 +264,37 @@ def main(cfg: DictConfig) -> None:
     val_loader = get_dataloader(
         split="val", split_fraction=val_fraction, **dataloader_cfg
     )
+
+    sampling_enabled = bool(
+        OmegaConf.select(cfg, "train.sampling.splot_balanced") or False
+    )
+    if sampling_enabled:
+        positive_dataset = str(
+            OmegaConf.select(cfg, "train.sampling.positive_dataset") or "splot"
+        )
+        positive_fraction = float(
+            OmegaConf.select(cfg, "train.sampling.positive_fraction") or 0.5
+        )
+        replacement = bool(
+            OmegaConf.select(cfg, "train.sampling.replacement")
+            if OmegaConf.select(cfg, "train.sampling.replacement") is not None
+            else True
+        )
+        sampler = _build_splot_balanced_sampler(
+            dataset=train_loader.dataset,
+            positive_dataset=positive_dataset,
+            positive_fraction=positive_fraction,
+            replacement=replacement,
+            seed=subset_seed,
+        )
+        if sampler is not None:
+            train_loader = DataLoader(
+                train_loader.dataset,
+                batch_size=batch_size,
+                sampler=sampler,
+                shuffle=False,
+                num_workers=num_workers,
+            )
 
     x0, _ = next(iter(train_loader))
     console.print(f"Predictor shape (C,H,W): [cyan]{tuple(x0.shape[1:])}[/cyan]")

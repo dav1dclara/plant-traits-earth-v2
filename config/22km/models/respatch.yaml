@@ -1,6 +1,6 @@
 # Active STL model (single source of truth).
 _target_: ptev2.models.multitask.STLModel
-base_channels: 48
+base_channels: 32
 norm: gn
 activation: prelu
 gn_groups: 8
