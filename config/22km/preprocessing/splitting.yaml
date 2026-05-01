@@ -1,21 +1,26 @@
 data_dir: "/scratch3/plant-traits-v2/data/"
+validity_mask: "${data_dir}22km/predictor_validity_mask.tif"
 
 targets:
-  resolution_km: "22"
-  source: "comb"  # "comb" means union of splot+gbif; optional `sources` can override
-  sources: [splot, gbif]
+  resolution_km: 22
 
 h3:
   resolution: 1
 
 splitting:
-  train_frac: 0.7
-  val_frac: 0.2
-  test_frac: 0.1
+  train_frac: 0.70
+  val_frac: 0.20
+  test_frac: 0.10
 
 jsd:
-  sources: [splot]  # optimize JSD using splot only (ground-truth focus)
-  bands: [1]  # mean only; robust for sources with single-band targets
-  n_restarts: 3000
+  bands: [1]
+  n_restarts: 500
   n_bins: 50
-  random_seed: 11
+  random_seed: 42
+
+spatial:
+  jsd_tolerance: 0.05  # max fractional JSD degradation allowed during spatial refinement
+  n_iters: 10000       # number of swap attempts
+
+debug:
+  n_traits: null  # set to an integer to limit to first N traits (e.g. 5 for quick testing)

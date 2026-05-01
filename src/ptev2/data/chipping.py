@@ -529,7 +529,7 @@ def chip_rasters_to_zarr(
                             continue
 
                         for split_name in chip_splits:
-                            if require_valid_target:
+                            if require_valid_target and split_name != "all":
                                 if split_name == "all":
                                     valid_region = mask_chip >= 0
                                 else:

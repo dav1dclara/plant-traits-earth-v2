@@ -15,12 +15,14 @@ import rasterio
 from omegaconf import DictConfig
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from scipy.spatial.distance import cdist
 
 from ptev2.data.splitting import (
     build_cell_index,
     build_cell_labels,
     build_histograms_from_rasters,
     build_split_gdf,
+    compute_total_jsd,
     count_valid_pixels_per_raster,
     generate_h3_grids,
     optimize_splits,
@@ -188,9 +190,7 @@ def main(cfg: DictConfig) -> None:
     splot_n_traits_obs = n_traits_all[splot_indices].tolist()
     del n_traits_all
 
-    # -------------------------------------------------------------------------
     # GBIF: count gbif-only cells before JSD so splot fractions can be adjusted
-    # -------------------------------------------------------------------------
     console.print("\n[bold]Counting GBIF-only cells[/bold]")
     non_splot_indices = set(np.where(~has_splot_arr)[0].tolist())
     console.print(f"Non-splot cells to check: {len(non_splot_indices):,}")
@@ -243,7 +243,7 @@ def main(cfg: DictConfig) -> None:
     else:
         console.print(
             f"[yellow]Validity mask not found at {validity_mask_path} — skipping predict cells.[/yellow]\n"
-            "[yellow]Run scripts/1km/preprocessing/build_validity_mask.py first.[/yellow]"
+            "[yellow]Run scripts/utils/build_predictor_validity_mask.py first.[/yellow]"
         )
 
     # JSD optimisation: splot counts back-solved to hit global train/val/test targets
@@ -264,6 +264,82 @@ def main(cfg: DictConfig) -> None:
         histograms, bin_edges, n_train_splot, n_val_splot, n_test_splot, n_restarts, rng
     )
     console.print(f"Best mean JSD: {best_score:.6f}")
+
+    # Spatial refinement: swap test ↔ non-test cells to maximise geographic
+    # spread of test cells, accepting swaps only when JSD stays within tolerance.
+    jsd_tolerance = float(cfg.spatial.get("jsd_tolerance", 0.05))
+    n_spatial_iters = int(cfg.spatial.get("n_iters", 10_000))
+
+    console.print("\n[bold]Spatial refinement of test cell spread[/bold]")
+    console.print(f"JSD tolerance:  [cyan]{jsd_tolerance:.0%}[/cyan]")
+    console.print(f"Swap attempts:  [cyan]{n_spatial_iters:,}[/cyan]")
+
+    # Convert splot cell centroids to 3D unit-sphere coordinates so that
+    # Euclidean distance is a monotone proxy for great-circle distance.
+    lonlat = np.array(
+        [
+            [
+                polys_4326[splot_indices[i]].centroid.x,
+                polys_4326[splot_indices[i]].centroid.y,
+            ]
+            for i in range(n_splot)
+        ]
+    )
+    lon_r, lat_r = np.radians(lonlat[:, 0]), np.radians(lonlat[:, 1])
+    xyz = np.column_stack(
+        [
+            np.cos(lat_r) * np.cos(lon_r),
+            np.cos(lat_r) * np.sin(lon_r),
+            np.sin(lat_r),
+        ]
+    )
+    # Precompute full pairwise distance matrix once (n_splot × n_splot)
+    pairwise_dist = cdist(xyz, xyz)
+
+    def _spread(labels: np.ndarray) -> float:
+        """Mean pairwise distance between test cells — higher = less clustered."""
+        idx = np.where(labels == 2)[0]
+        if len(idx) < 2:
+            return 0.0
+        d = pairwise_dist[np.ix_(idx, idx)]
+        return float(d.sum()) / (len(idx) * (len(idx) - 1))
+
+    jsd_budget = best_score * (1.0 + jsd_tolerance)
+    current_labels = best_labels.copy()
+    current_spread = _spread(current_labels)
+    test_idx = np.where(current_labels == 2)[0]
+    non_test_idx = np.where(current_labels != 2)[0]
+    n_accepted = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Refining...", total=n_spatial_iters)
+        for _ in range(n_spatial_iters):
+            i = int(rng.choice(test_idx))
+            j = int(rng.choice(non_test_idx))
+            new_labels = current_labels.copy()
+            new_labels[i], new_labels[j] = new_labels[j], new_labels[i]
+            new_spread = _spread(new_labels)
+            if new_spread > current_spread:
+                if compute_total_jsd(histograms, new_labels, bin_edges) <= jsd_budget:
+                    current_labels = new_labels
+                    current_spread = new_spread
+                    test_idx = np.where(current_labels == 2)[0]
+                    non_test_idx = np.where(current_labels != 2)[0]
+                    n_accepted += 1
+            progress.advance(task)
+
+    best_labels = current_labels
+    final_jsd = compute_total_jsd(histograms, best_labels, bin_edges)
+    console.print(f"Swaps accepted: [cyan]{n_accepted:,}[/cyan]")
+    console.print(f"Final spread:   [cyan]{current_spread:.4f}[/cyan]")
+    console.print(
+        f"Final JSD:      [cyan]{final_jsd:.6f}[/cyan] (budget: {jsd_budget:.6f})"
+    )
 
     split_map = {0: "train", 1: "val", 2: "test"}
     splot_splits = [split_map[int(l)] for l in best_labels]

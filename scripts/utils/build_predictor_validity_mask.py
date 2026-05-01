@@ -1,23 +1,32 @@
 """Build a predictor validity mask.
 
-Reads all predictor rasters under predictors.out_dir and writes a uint8 GeoTIFF
-where 1 means at least one predictor has valid (non-nodata) data at that pixel, and
-0 means no predictor has data. Used by the chipping pipeline to include all
-informative chips in the "all" split, regardless of H3 coverage.
+Reads all predictor rasters under PREDICTORS_DIR and writes a uint8 GeoTIFF
+named predictor_validity_mask.tif where 1 means at least one predictor has
+valid (non-nodata) data at that pixel, and 0 means no predictor has data.
+Used by the splitting pipeline to include all informative chips in the "all"
+split, regardless of H3 coverage.
 
 Usage:
-    python build_validity_mask.py
+    python scripts/utils/build_predictor_validity_mask.py --predictors_dir <dir> --out_path <file.tif>
+
+Examples:
+    python scripts/utils/build_predictor_validity_mask.py \
+        --predictors_dir /scratch3/plant-traits-v2/data/1km/predictors \
+        --out_path /scratch3/plant-traits-v2/data/1km/predictor_validity_mask.tif
+
+    python scripts/utils/build_predictor_validity_mask.py \
+        --predictors_dir /scratch3/plant-traits-v2/data/22km/eo_data_processed \
+        --out_path /scratch3/plant-traits-v2/data/22km/predictor_validity_mask.tif
 """
 
+import argparse
 import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import hydra
 import numpy as np
 import rasterio
 import rasterio.windows
-from omegaconf import DictConfig
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -34,19 +43,28 @@ console = Console()
 STRIP_HEIGHT = 512
 
 
-@hydra.main(
-    version_base=None,
-    config_path="../../../config/1km",
-    config_name="preprocessing",
-)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build a predictor validity mask.")
+    parser.add_argument(
+        "--predictors_dir",
+        type=Path,
+        required=True,
+        help="Directory containing predictor GeoTIFFs (searched recursively).",
+    )
+    parser.add_argument(
+        "--out_path",
+        type=Path,
+        required=True,
+        help="Output path for the predictor validity mask GeoTIFF.",
+    )
+    args = parser.parse_args()
+
+    predictors_dir: Path = args.predictors_dir
+    out_path: Path = args.out_path
+
     console.rule("[bold]BUILDING PREDICTOR VALIDITY MASK[/bold]")
 
-    predictors_dir = Path(cfg.predictors.out_dir)
-    out_path = Path(cfg.validity_mask)
-
     predictor_paths = sorted(predictors_dir.glob("**/*.tif"))
-
     if not predictor_paths:
         raise ValueError(f"No .tif files found under {predictors_dir}")
 
@@ -80,7 +98,7 @@ def main(cfg: DictConfig) -> None:
         console=console,
     )
     with progress:
-        task = progress.add_task("Reading predictor masks", total=n_strips)
+        task = progress.add_task("Reading strips", total=n_strips)
         with ThreadPoolExecutor(max_workers=min(32, len(srcs))) as executor:
             for i in range(n_strips):
                 y0 = i * STRIP_HEIGHT
@@ -130,10 +148,10 @@ def main(cfg: DictConfig) -> None:
             blockysize=256,
         ) as dst:
             dst.write(valid_mask, 1)
-        size_mb = out_path.stat().st_size / 1e6
+        size_kb = out_path.stat().st_size / 1e3
 
     console.print(
-        f"[green]Done.[/green] Saved [cyan]{out_path}[/cyan] ({size_mb:.1f} MB)"
+        f"[green]Done.[/green] Saved [cyan]{out_path}[/cyan] ({size_kb:.1f} KB)"
     )
 
 
