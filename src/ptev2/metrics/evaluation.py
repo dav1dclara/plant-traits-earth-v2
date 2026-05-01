@@ -65,6 +65,15 @@ def _finite_mean(values: Sequence[float]) -> float:
     return float(np.mean(finite))
 
 
+def _nrmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    if y_true.size == 0:
+        return float(np.nan)
+    value_range = float(np.nanmax(y_true) - np.nanmin(y_true))
+    if not np.isfinite(value_range) or value_range <= 0.0:
+        return float(np.nan)
+    return float(rmse(y_true, y_pred) / value_range)
+
+
 def summarize_single_trait_metrics(
     y_true: Any,
     y_pred: Any,
@@ -106,12 +115,14 @@ def summarize_single_trait_metrics(
 
     if global_y_true.size > 0:
         global_rmse = float(rmse(global_y_true, global_y_pred))
+        global_nrmse = _nrmse(global_y_true, global_y_pred)
         global_r2 = float(r2_score(global_y_true, global_y_pred))
         global_pearson_r = float(pearson_r(global_y_true, global_y_pred))
         global_mae = float(mae(global_y_true, global_y_pred))
         global_n_valid = int(global_y_true.size)
     else:
         global_rmse = float("nan")
+        global_nrmse = float("nan")
         global_r2 = float("nan")
         global_pearson_r = float("nan")
         global_mae = float("nan")
@@ -145,12 +156,14 @@ def summarize_single_trait_metrics(
             yt_trait = y_true_trait[valid_trait]
             yp_trait = y_pred_trait[valid_trait]
             trait_rmse = float(rmse(yt_trait, yp_trait))
+            trait_nrmse = _nrmse(yt_trait, yp_trait)
             trait_r2 = float(r2_score(yt_trait, yp_trait))
             trait_pearson_r = float(pearson_r(yt_trait, yp_trait))
             trait_mae = float(mae(yt_trait, yp_trait))
             trait_n_valid = int(yt_trait.size)
         else:
             trait_rmse = float("nan")
+            trait_nrmse = float("nan")
             trait_r2 = float("nan")
             trait_pearson_r = float("nan")
             trait_mae = float("nan")
@@ -159,12 +172,14 @@ def summarize_single_trait_metrics(
         trait_metrics[str(trait_name)] = {
             "n_valid": trait_n_valid,
             "rmse": trait_rmse,
+            "nrmse": trait_nrmse,
             "r2": trait_r2,
             "pearson_r": trait_pearson_r,
             "mae": trait_mae,
         }
 
     macro_rmse = _finite_mean([values["rmse"] for values in trait_metrics.values()])
+    macro_nrmse = _finite_mean([values["nrmse"] for values in trait_metrics.values()])
     macro_r2 = _finite_mean([values["r2"] for values in trait_metrics.values()])
     macro_pearson_r = _finite_mean(
         [values["pearson_r"] for values in trait_metrics.values()]
@@ -173,11 +188,13 @@ def summarize_single_trait_metrics(
 
     return {
         "rmse": global_rmse,
+        "nrmse": global_nrmse,
         "r2": global_r2,
         "pearson_r": global_pearson_r,
         "mae": global_mae,
         "n_valid": global_n_valid,
         "macro_rmse": macro_rmse,
+        "macro_nrmse": macro_nrmse,
         "macro_r2": macro_r2,
         "macro_pearson_r": macro_pearson_r,
         "macro_mae": macro_mae,

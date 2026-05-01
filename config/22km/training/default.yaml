@@ -32,7 +32,7 @@ data:
     bands: [mean]
 
 data_loaders:
-  batch_size: 32
+  batch_size: 128
   num_workers: 8
   train_fraction: 1.0
   val_fraction: 1.0
@@ -42,7 +42,7 @@ train:
   seed: 0
   run_name: null
   group: null
-  epochs: 25
+  epochs: 15
 
   optimizer:
     _target_: torch.optim.Adam
@@ -53,8 +53,8 @@ train:
     _target_: ptev2.loss.WeightedMaskedDenseLoss
     error_type: smooth_l1
     huber_delta: 1.0
-    w_splot: 1.0
-    w_gbif: 0.1
+    splot_weight: 1.0
+    gbif_weight: 0.1
 
   scheduler:
     _target_: torch.optim.lr_scheduler.StepLR
@@ -62,7 +62,7 @@ train:
     gamma: 0.7
 
   supervision:
-    mode: center_pixel
+    mode: dense
     center_crop_size: 1
 
   predictor_validity:
@@ -76,14 +76,14 @@ train:
   eval_dataset: splot
 
   selection:
-    metric: val_splot_macro_rmse
-    mode: min
+    metric: val_splot_macro_pearson
+    mode: max
 
   gradient_clip_norm: 1.0
 
   early_stopping:
     enabled: true
-    patience: 8
+    patience: 5
     min_delta: 0.0
 
 mmoe:

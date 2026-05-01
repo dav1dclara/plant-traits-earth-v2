@@ -14,10 +14,19 @@ class WeightedMaskedDenseLoss(nn.Module):
         huber_delta: float = 1.0,
         w_gbif: float = 1.0,
         w_splot: float = 2.0,
+        gbif_weight: float | None = None,
+        splot_weight: float | None = None,
+        lambda_gbif: float | None = None,
     ) -> None:
         super().__init__()
         self.error_type = str(error_type).lower()
         self.huber_delta = float(huber_delta)
+        if splot_weight is not None:
+            w_splot = float(splot_weight)
+        if gbif_weight is not None:
+            w_gbif = float(gbif_weight)
+        if lambda_gbif is not None:
+            w_gbif = float(lambda_gbif)
         self.w_gbif = float(w_gbif)
         self.w_splot = float(w_splot)
 

@@ -339,7 +339,7 @@ def main(cfg: DictConfig) -> None:
     if supervision_mode == "dense":
         console.print(
             "[yellow]Dense supervision with overlapping chips can duplicate target pixels in "
-            "loss/metrics. Use only as an ablation unless unique-pixel de-duplication is implemented.[/yellow]"
+            "loss/metrics. This run reports per-chip dense metrics; unique-cell aggregation can be added later.[/yellow]"
         )
     if supervision_mode == "center_crop":
         console.print(
@@ -461,10 +461,12 @@ def main(cfg: DictConfig) -> None:
         "n_valid_gbif": int(n_valid_gbif),
         "skipped_batches": int(skipped_batches),
         "rmse": float(metric_summary["rmse"]),
+        "nrmse": float(metric_summary["nrmse"]),
         "r2": float(metric_summary["r2"]),
         "pearson_r": float(metric_summary["pearson_r"]),
         "mae": float(metric_summary["mae"]),
         "macro_rmse": float(metric_summary["macro_rmse"]),
+        "macro_nrmse": float(metric_summary["macro_nrmse"]),
         "macro_r2": float(metric_summary["macro_r2"]),
         "macro_pearson_r": float(metric_summary["macro_pearson_r"]),
         "macro_mae": float(metric_summary["macro_mae"]),
@@ -586,6 +588,7 @@ def main(cfg: DictConfig) -> None:
     console.print(f"n_valid_splot: [cyan]{compact_metrics['n_valid_splot']}[/cyan]")
     console.print(f"n_valid_gbif:  [cyan]{compact_metrics['n_valid_gbif']}[/cyan]")
     console.print(f"macro_rmse: [cyan]{compact_metrics['macro_rmse']:.6f}[/cyan]")
+    console.print(f"macro_nrmse: [cyan]{compact_metrics['macro_nrmse']:.6f}[/cyan]")
     console.print(f"macro_r2:   [cyan]{compact_metrics['macro_r2']:.6f}[/cyan]")
     console.print(f"macro_r:    [cyan]{compact_metrics['macro_pearson_r']:.6f}[/cyan]")
     console.print(f"macro_mae:  [cyan]{compact_metrics['macro_mae']:.6f}[/cyan]")

@@ -45,12 +45,13 @@ def _resolve_selection_value(
     lookup = {
         "val_splot_macro_pearson": float(val_summary["macro_pearson_r"]),
         "val_splot_macro_rmse": float(val_summary["macro_rmse"]),
+        "val_splot_macro_nrmse": float(val_summary["macro_nrmse"]),
         "val_splot_rmse": float(val_summary["rmse"]),
     }
     if metric_name not in lookup:
         raise ValueError(
             "Unsupported train.selection.metric='{}'".format(metric_name)
-            + ". Use val_splot_macro_pearson|val_splot_macro_rmse|val_splot_rmse|val_splot_loss."
+            + ". Use val_splot_macro_pearson|val_splot_macro_rmse|val_splot_macro_nrmse|val_splot_rmse|val_splot_loss."
         )
     return lookup[metric_name]
 
@@ -216,18 +217,21 @@ def main(cfg: DictConfig) -> None:
     if not selection_metric_name.startswith("val_splot_"):
         raise ValueError(
             "Model selection must use sPlot validation metrics. "
-            "Use val_splot_macro_pearson|val_splot_macro_rmse|val_splot_rmse|val_splot_loss."
+            "Use val_splot_macro_pearson|val_splot_macro_rmse|val_splot_macro_nrmse|val_splot_rmse|val_splot_loss."
         )
 
     primary_ds = str(OmegaConf.select(cfg, "data.targets.primary_dataset") or "splot")
     aux_ds = str(OmegaConf.select(cfg, "data.targets.auxiliary_dataset") or "gbif")
     w_splot = float(
         OmegaConf.select(cfg, "train.source_weights.splot")
+        or OmegaConf.select(cfg, "train.loss.splot_weight")
         or OmegaConf.select(cfg, "train.loss.w_splot")
         or 1.0
     )
     w_gbif = float(
         OmegaConf.select(cfg, "train.source_weights.gbif")
+        or OmegaConf.select(cfg, "train.loss.gbif_weight")
+        or OmegaConf.select(cfg, "train.loss.lambda_gbif")
         or OmegaConf.select(cfg, "train.loss.w_gbif")
         or 0.1
     )
@@ -245,7 +249,7 @@ def main(cfg: DictConfig) -> None:
     if supervision_mode == "dense":
         console.print(
             "[yellow]Dense supervision with overlapping chips can duplicate target pixels in "
-            "loss/metrics. Use only as an ablation unless unique-pixel de-duplication is implemented.[/yellow]"
+            "loss/metrics. This run reports per-chip dense metrics; unique-cell aggregation can be added later.[/yellow]"
         )
     if supervision_mode == "center_crop":
         console.print(
@@ -586,6 +590,20 @@ def main(cfg: DictConfig) -> None:
                 f"traits_below_{low_support_threshold}="
                 f"{val_support_summary['n_traits_below_threshold']}"
             )
+        if val_summary is not None:
+            console.print(
+                "val_splot_macro_pearson="
+                f"{float(val_summary['macro_pearson_r']):.6f} "
+                "val_splot_macro_rmse="
+                f"{float(val_summary['macro_rmse']):.6f} "
+                "val_splot_macro_nrmse="
+                f"{float(val_summary['macro_nrmse']):.6f}"
+            )
+        if val_gbif_summary is not None:
+            console.print(
+                "val_gbif_macro_pearson="
+                f"{float(val_gbif_summary['macro_pearson_r']):.6f}"
+            )
 
         if cfg.wandb.enabled and wandb_module is not None:
             log_dict: dict[str, Any] = {
@@ -593,26 +611,17 @@ def main(cfg: DictConfig) -> None:
                 "train/splot_loss": train_splot_loss,
                 "train/gbif_loss": train_gbif_loss,
                 "train/lr": current_lr,
-                "val/loss": val_splot_loss,
-                "val/mean_r": float("nan")
-                if val_summary is None
-                else float(val_summary["macro_pearson_r"]),
                 "val/splot_loss": val_splot_loss,
                 "val/gbif_loss": val_gbif_loss,
                 "val/selection": selection_value,
             }
 
             if val_summary is not None:
-                trait_metrics = val_summary["trait_metrics"]
                 log_dict.update(
                     {
-                        "val/macro_r2": val_summary["macro_r2"],
-                        "val/macro_pearson_r": val_summary["macro_pearson_r"],
-                        "val/splot/rmse": val_summary["rmse"],
-                        "val/splot/r2": val_summary["r2"],
-                        "val/splot/pearson_r": val_summary["pearson_r"],
-                        "val/splot/macro_rmse": val_summary["macro_rmse"],
-                        "val/splot/macro_pearson_r": val_summary["macro_pearson_r"],
+                        "val_splot_macro_pearson": val_summary["macro_pearson_r"],
+                        "val_splot_macro_rmse": val_summary["macro_rmse"],
+                        "val_splot_macro_nrmse": val_summary["macro_nrmse"],
                     }
                 )
                 if val_support_summary is not None:
@@ -639,23 +648,15 @@ def main(cfg: DictConfig) -> None:
                         }
                     )
 
-                for trait_name, m in trait_metrics.items():
-                    if math.isfinite(float(m["pearson_r"])):
-                        log_dict[f"val/per_trait_r.X{trait_name}"] = float(
-                            m["pearson_r"]
-                        )
-
                 if improved:
-                    log_dict["val/mean_r_best"] = float(val_summary["macro_pearson_r"])
+                    log_dict["val_splot_macro_pearson_best"] = float(
+                        val_summary["macro_pearson_r"]
+                    )
 
             if val_gbif_summary is not None:
                 log_dict.update(
                     {
-                        "val/gbif/rmse": val_gbif_summary["rmse"],
-                        "val/gbif/r2": val_gbif_summary["r2"],
-                        "val/gbif/pearson_r": val_gbif_summary["pearson_r"],
-                        "val/gbif/macro_rmse": val_gbif_summary["macro_rmse"],
-                        "val/gbif/macro_pearson_r": val_gbif_summary["macro_pearson_r"],
+                        "val_gbif_macro_pearson": val_gbif_summary["macro_pearson_r"],
                     }
                 )
 
