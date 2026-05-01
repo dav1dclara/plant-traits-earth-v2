@@ -561,6 +561,11 @@ def main(cfg: DictConfig) -> None:
                 },
                 best_path,
             )
+            console.print(
+                "[green]Best checkpoint updated[/green] "
+                f"(epoch={best_epoch}, {selection_metric_name}={best_selection:.6f}) "
+                f"-> [cyan]{best_path}[/cyan]"
+            )
         else:
             epochs_wo_improve += 1
 
@@ -614,9 +619,11 @@ def main(cfg: DictConfig) -> None:
                 "val/splot_loss": val_splot_loss,
                 "val/gbif_loss": val_gbif_loss,
                 "val/selection": selection_value,
+                "checkpoint/best_updated": 0,
             }
 
             if val_summary is not None:
+                trait_metrics = val_summary["trait_metrics"]
                 log_dict.update(
                     {
                         "val_splot_macro_pearson": val_summary["macro_pearson_r"],
@@ -624,34 +631,21 @@ def main(cfg: DictConfig) -> None:
                         "val_splot_macro_nrmse": val_summary["macro_nrmse"],
                     }
                 )
-                if val_support_summary is not None:
-                    log_dict.update(
-                        {
-                            "val/splot/per_trait_n_valid_min": val_support_summary[
-                                "min"
-                            ],
-                            "val/splot/per_trait_n_valid_p25": val_support_summary[
-                                "p25"
-                            ],
-                            "val/splot/per_trait_n_valid_median": val_support_summary[
-                                "median"
-                            ],
-                            "val/splot/per_trait_n_valid_p75": val_support_summary[
-                                "p75"
-                            ],
-                            "val/splot/per_trait_n_valid_max": val_support_summary[
-                                "max"
-                            ],
-                            f"val/splot/per_trait_n_valid_n_below_{low_support_threshold}": val_support_summary[
-                                "n_traits_below_threshold"
-                            ],
-                        }
-                    )
+
+                for trait_name, m in trait_metrics.items():
+                    if math.isfinite(float(m["pearson_r"])):
+                        log_dict[f"val/per_trait_r.X{trait_name}"] = float(
+                            m["pearson_r"]
+                        )
 
                 if improved:
                     log_dict["val_splot_macro_pearson_best"] = float(
                         val_summary["macro_pearson_r"]
                     )
+                    log_dict["checkpoint/best_updated"] = 1
+                    log_dict["checkpoint/best_epoch"] = int(best_epoch)
+                    log_dict["checkpoint/best_selection_value"] = float(best_selection)
+                    log_dict["checkpoint/best_path"] = str(best_path)
 
             if val_gbif_summary is not None:
                 log_dict.update(
