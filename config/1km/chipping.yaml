@@ -22,7 +22,7 @@ data:
       use: false
       bands: []
     vodca:
-      use: true
+      use: false
       bands: []
     worldclim:
       use: false

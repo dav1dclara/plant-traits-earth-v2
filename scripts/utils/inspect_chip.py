@@ -5,12 +5,13 @@ selected predictor and target is rendered as a separate panel in a grid and
 saved to viz/chips/.
 
 Configuration:
-    ZARR_PATH            Path to the chips directory (contains {split}.zarr stores).
-    SPLIT                Which split store to read from: "train", "val", or "test".
-    CHIP_IDX             Index of the chip to visualize.
-    PREDICTORS_TO_PLOT   Predictor names to include; empty list plots all.
-    TARGETS_TO_PLOT      Target dataset names to include; empty list plots all.
-    TARGET_TRAITS_TO_PLOT  Trait band names to include; empty list plots all.
+    ZARR_PATH              Path to the chips directory (contains {split}.zarr stores).
+    SPLIT                  Which split store to read from: "train", "val", or "test".
+    CHIP_IDX               Index of the chip to visualize.
+    PREDICTORS_TO_PLOT     Predictor names to include; empty list plots all.
+    TARGETS_TO_PLOT        Target dataset names to include; empty list plots all.
+    TARGET_TRAITS_TO_PLOT  Trait names to include (e.g. ["X1080"]); empty list plots all.
+    TARGET_BANDS_TO_PLOT   Band names to include (e.g. ["mean", "count"]); empty list plots all.
 """
 
 from pathlib import Path
@@ -19,12 +20,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import zarr
 
-ZARR_PATH = "/scratch3/plant-traits-v2/data/1km/chips/patch256_stride256/"
-SPLIT = "train"
-CHIP_IDX = 1221
-PREDICTORS_TO_PLOT = []  # empty = plot all
+ZARR_PATH = "/scratch3/plant-traits-v2/data/22km/chips/patch7_stride3/"
+SPLIT = "val"
+CHIP_IDX = 5498
+PREDICTORS_TO_PLOT = ["canopy_height"]  # empty = plot all
 TARGETS_TO_PLOT = ["splot", "gbif"]  # empty = plot all
-TARGET_TRAITS_TO_PLOT = []  # empty = plot all
+TARGET_TRAITS_TO_PLOT = ["X1080"]  # empty = plot all traits
+TARGET_BANDS_TO_PLOT = ["mean"]  # empty = plot all bands
 
 plt.rcParams["font.family"] = "monospace"
 
@@ -63,7 +65,9 @@ for arr_name, arr in sorted(tgt_group.arrays()):
             else str(band_in_file)
         )
         label = f"{trait} - {band_name}"
-        if TARGET_TRAITS_TO_PLOT and label not in TARGET_TRAITS_TO_PLOT:
+        if TARGET_TRAITS_TO_PLOT and trait not in TARGET_TRAITS_TO_PLOT:
+            continue
+        if TARGET_BANDS_TO_PLOT and band_name not in TARGET_BANDS_TO_PLOT:
             continue
         panels.append((f"targets/{arr_name}\n{label}", data[band_idx]))
 
