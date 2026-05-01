@@ -7,6 +7,86 @@ import torch
 import zarr
 from omegaconf import DictConfig, OmegaConf
 
+SUPPORTED_SUPERVISION_MODES = {"center_pixel", "center_crop", "dense"}
+
+
+def resolve_supervision_config(cfg: DictConfig) -> tuple[str, int]:
+    mode_raw = OmegaConf.select(cfg, "train.supervision.mode")
+    if mode_raw is None:
+        raise ValueError(
+            "Missing required config: train.supervision.mode "
+            "(use one of center_pixel|center_crop|dense)."
+        )
+    mode = str(mode_raw).lower()
+    if mode not in SUPPORTED_SUPERVISION_MODES:
+        raise ValueError(
+            f"Unsupported train.supervision.mode='{mode_raw}'. "
+            "Use one of center_pixel|center_crop|dense."
+        )
+
+    center_crop_size_raw = OmegaConf.select(cfg, "train.supervision.center_crop_size")
+    if center_crop_size_raw is None:
+        raise ValueError("Missing required config: train.supervision.center_crop_size.")
+    center_crop_size = int(center_crop_size_raw)
+    if center_crop_size < 1:
+        raise ValueError(
+            f"train.supervision.center_crop_size must be >= 1, got {center_crop_size}."
+        )
+    if mode == "center_pixel":
+        center_crop_size = 1
+    return mode, center_crop_size
+
+
+def resolve_predictor_validity_config(cfg: DictConfig) -> tuple[str, float]:
+    mode_raw = OmegaConf.select(cfg, "train.predictor_validity.mode")
+    if mode_raw is None:
+        raise ValueError("Missing required config: train.predictor_validity.mode.")
+    mode = str(mode_raw).lower()
+
+    min_finite_ratio_raw = OmegaConf.select(
+        cfg, "train.predictor_validity.min_finite_ratio"
+    )
+    if min_finite_ratio_raw is None:
+        raise ValueError(
+            "Missing required config: train.predictor_validity.min_finite_ratio."
+        )
+    min_finite_ratio = float(min_finite_ratio_raw)
+    if mode in {"min_fraction", "fraction"} and (
+        min_finite_ratio <= 0.0 or min_finite_ratio > 1.0
+    ):
+        raise ValueError(
+            "train.predictor_validity.min_finite_ratio must be in (0,1] for min_fraction mode, "
+            f"got {min_finite_ratio}."
+        )
+    return mode, min_finite_ratio
+
+
+def assert_supervision_shape(
+    tensor: torch.Tensor,
+    mode: str,
+    center_crop_size: int,
+    context: str,
+) -> None:
+    h, w = int(tensor.shape[-2]), int(tensor.shape[-1])
+    if mode == "center_pixel":
+        if (h, w) != (1, 1):
+            raise AssertionError(
+                f"{context}: center_pixel supervision expects spatial shape (1,1), got {(h, w)}."
+            )
+        return
+    if mode == "center_crop":
+        expected = (int(center_crop_size), int(center_crop_size))
+        if (h, w) != expected:
+            raise AssertionError(
+                f"{context}: center_crop supervision expects spatial shape {expected}, got {(h, w)}."
+            )
+        return
+    if mode == "dense":
+        return
+    raise ValueError(
+        f"Unsupported train.supervision.mode='{mode}'. Use dense|center_pixel|center_crop."
+    )
+
 
 def resolve_device() -> torch.device:
     if torch.cuda.is_available():
@@ -55,19 +135,29 @@ def build_target_layout(
     train_store: zarr.Group,
 ) -> dict[str, Any]:
     target_cfg = train_cfg.data.targets
-    target_mode = str(OmegaConf.select(target_cfg, "mode") or "splot_only")
+    target_mode_raw = str(OmegaConf.select(target_cfg, "mode") or "splot_only")
+    mode_aliases = {
+        "dual_source_comb_single_head": "dual_source",
+        "dual_source_single_head": "dual_source",
+        "dual_source": "dual_source",
+        "source_weighted": "dual_source",
+        "splot_primary_gbif_aux": "dual_source",
+        "splot_only": "splot_only",
+    }
+    target_mode = mode_aliases.get(target_mode_raw)
     primary_dataset = str(OmegaConf.select(target_cfg, "primary_dataset") or "splot")
     auxiliary_dataset = str(OmegaConf.select(target_cfg, "auxiliary_dataset") or "gbif")
     eval_dataset = str(OmegaConf.select(target_cfg, "eval_dataset") or primary_dataset)
 
     if target_mode == "splot_only":
         active_datasets = [primary_dataset]
-    elif target_mode in {"dual_source_comb_single_head", "dual_source_single_head"}:
+    elif target_mode == "dual_source":
         active_datasets = [primary_dataset, auxiliary_dataset]
     else:
         raise ValueError(
-            f"Unsupported data.targets.mode='{target_mode}'. "
-            "Use one of ['splot_only', 'dual_source_single_head', 'dual_source_comb_single_head']."
+            f"Unsupported data.targets.mode='{target_mode_raw}'. "
+            "Use one of ['splot_only', 'dual_source', 'source_weighted', 'splot_primary_gbif_aux'] "
+            "or legacy ['dual_source_single_head', 'dual_source_comb_single_head']."
         )
 
     zarr_dataset_names = list(train_store["targets"].keys())
@@ -202,8 +292,13 @@ def move_bundle_to_device(
 def slice_center(t: torch.Tensor, size: int) -> torch.Tensor:
     h = t.shape[-2]
     w = t.shape[-1]
-    size = max(1, int(size))
-    size = min(size, h, w)
+    size = int(size)
+    if size < 1:
+        raise ValueError(f"Center crop size must be >= 1, got {size}.")
+    if size > h or size > w:
+        raise ValueError(
+            f"Center crop size {size} exceeds tensor spatial shape {(h, w)}."
+        )
     top = (h - size) // 2
     left = (w - size) // 2
     return t[..., top : top + size, left : left + size]
@@ -214,15 +309,22 @@ def apply_supervision_tensor(
     mode: str,
     center_crop_size: int,
 ) -> torch.Tensor:
-    if mode == "dense":
-        return t
+    supervised = t
     if mode == "center_pixel":
-        return slice_center(t, 1)
-    if mode == "center_crop":
-        return slice_center(t, center_crop_size)
-    raise ValueError(
-        f"Unsupported train.supervision.mode='{mode}'. Use dense|center_pixel|center_crop."
+        supervised = slice_center(t, 1)
+    elif mode == "center_crop":
+        supervised = slice_center(t, center_crop_size)
+    elif mode != "dense":
+        raise ValueError(
+            f"Unsupported train.supervision.mode='{mode}'. Use dense|center_pixel|center_crop."
+        )
+    assert_supervision_shape(
+        supervised,
+        mode=mode,
+        center_crop_size=center_crop_size,
+        context="apply_supervision_tensor",
     )
+    return supervised
 
 
 def apply_supervision_bundle(

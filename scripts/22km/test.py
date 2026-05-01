@@ -20,12 +20,15 @@ from ptev2.metrics.evaluation import summarize_single_trait_metrics
 from ptev2.utils import (
     apply_supervision_bundle,
     apply_supervision_tensor,
+    assert_supervision_shape,
     build_target_layout,
     mask_bundle_targets_with_validity,
     move_bundle_to_device,
     predict_batch,
     resolve_device,
     resolve_model_cfg,
+    resolve_predictor_validity_config,
+    resolve_supervision_config,
     resolve_train_zarr_dir,
     seed_all,
 )
@@ -106,10 +109,10 @@ def _write_all_prediction_tif(
     _xw = np.minimum(np.arange(1, w_out + 1), np.arange(w_out, 0, -1)).astype(
         np.float32
     )
-    weight_map = np.outer(_yw, _xw) ** 2
+    weight_map = np.outer(_yw, _xw).astype(np.float32) ** 2
 
     canvas = np.zeros((out_ch, canvas_rows, canvas_cols), dtype=np.float32)
-    weight_sum = np.zeros((canvas_rows, canvas_cols), dtype=np.float32)
+    weight_sum = np.zeros((out_ch, canvas_rows, canvas_cols), dtype=np.float32)
 
     for i in range(n_chips):
         min_x, _, _, max_y = bounds[i]
@@ -122,14 +125,16 @@ def _write_all_prediction_tif(
             continue
 
         chip = preds[i, :, r0 - row : r1 - row, c0 - col : c1 - col]
-        w = weight_map[r0 - row : r1 - row, c0 - col : c1 - col]
-        w = np.where(np.isfinite(chip[0]), w, 0.0)
-        canvas[:, r0:r1, c0:c1] += chip * w
-        weight_sum[r0:r1, c0:c1] += w
+        finite = np.isfinite(chip)
+        w = weight_map[None, r0 - row : r1 - row, c0 - col : c1 - col] * finite
+        canvas[:, r0:r1, c0:c1] += (
+            np.nan_to_num(chip, nan=0.0, posinf=0.0, neginf=0.0) * w
+        )
+        weight_sum[:, r0:r1, c0:c1] += w
 
+    output = np.full_like(canvas, np.nan)
     nonzero = weight_sum > 0
-    canvas[:, nonzero] /= weight_sum[nonzero]
-    canvas[:, ~nonzero] = np.nan
+    output[nonzero] = canvas[nonzero] / weight_sum[nonzero]
 
     out_geo_transform = Affine(
         pixel_w, 0, canvas_origin_x, 0, -pixel_h, canvas_origin_y
@@ -149,7 +154,7 @@ def _write_all_prediction_tif(
         tiled=True,
         nodata=np.nan,
     ) as dst:
-        dst.write(canvas)
+        dst.write(output)
         for b_idx, name in enumerate(band_names, start=1):
             dst.set_band_description(b_idx, name)
 
@@ -164,6 +169,7 @@ def _prepare_batch(
     center_crop_size: int,
     predictor_validity_mode: str,
     predictor_min_finite_ratio: float,
+    context: str,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, dict[str, torch.Tensor]] | None]:
     X = X.to(device=device, dtype=torch.float32)
     if bundle is not None:
@@ -176,10 +182,59 @@ def _prepare_batch(
     )
     y_pred = apply_supervision_tensor(y_pred, supervision_mode, center_crop_size)
     valid_x = apply_supervision_tensor(valid_x, supervision_mode, center_crop_size)
+    assert_supervision_shape(
+        y_pred,
+        mode=supervision_mode,
+        center_crop_size=center_crop_size,
+        context=f"{context}/y_pred",
+    )
+    assert_supervision_shape(
+        valid_x,
+        mode=supervision_mode,
+        center_crop_size=center_crop_size,
+        context=f"{context}/valid_x",
+    )
     if bundle is not None:
         bundle = apply_supervision_bundle(bundle, supervision_mode, center_crop_size)
         bundle = mask_bundle_targets_with_validity(bundle, valid_x)
+        for dataset_name, payload in bundle.items():
+            assert_supervision_shape(
+                payload["y"],
+                mode=supervision_mode,
+                center_crop_size=center_crop_size,
+                context=f"{context}/{dataset_name}/y",
+            )
+            assert_supervision_shape(
+                payload["source_mask"],
+                mode=supervision_mode,
+                center_crop_size=center_crop_size,
+                context=f"{context}/{dataset_name}/source_mask",
+            )
     return y_pred, valid_x, bundle
+
+
+def _update_source_counts(
+    *,
+    source_counts_per_trait: dict[str, dict[str, int]],
+    source_key: str,
+    payload: dict[str, torch.Tensor],
+    y_pred: torch.Tensor,
+    traits: list[str],
+    n_bands: int,
+) -> int:
+    valid = (
+        torch.isfinite(payload["y"])
+        & torch.isfinite(y_pred)
+        & (payload["source_mask"] > 0)
+    )
+    total = 0
+    for trait_idx, trait_name in enumerate(traits):
+        start = trait_idx * n_bands
+        stop = start + n_bands
+        count = int(valid[:, start:stop, :, :].sum().item())
+        source_counts_per_trait[trait_name][source_key] += count
+        total += count
+    return total
 
 
 @hydra.main(
@@ -198,6 +253,16 @@ def main(cfg: DictConfig) -> None:
     state, train_cfg = _load_checkpoint_and_train_cfg(checkpoint_path, device)
     seed_all(int(train_cfg.train.seed))
 
+    zarr_dir_override = OmegaConf.select(cfg, "zarr_dir")
+    if zarr_dir_override:
+        if OmegaConf.select(train_cfg, "data") is None:
+            train_cfg.data = {}
+        train_cfg.data.zarr_dir = str(zarr_dir_override)
+        console.print(
+            f"[yellow]Overriding checkpoint zarr_dir with test config:[/yellow] "
+            f"[cyan]{train_cfg.data.zarr_dir}[/cyan]"
+        )
+
     predictors = [k for k, v in train_cfg.data.predictors.items() if bool(v.use)]
     if not predictors:
         raise ValueError("No predictors enabled in checkpoint training config.")
@@ -206,9 +271,17 @@ def main(cfg: DictConfig) -> None:
     train_store = zarr.open_group(str(zarr_dir / "train.zarr"), mode="r")
     target_layout = build_target_layout(train_cfg, train_store)
 
-    eval_dataset = str(
-        OmegaConf.select(cfg, "eval_dataset") or target_layout["eval_dataset"]
-    )
+    eval_dataset_ckpt = str(target_layout["eval_dataset"])
+    eval_dataset_override = OmegaConf.select(cfg, "eval_dataset")
+    if (
+        eval_dataset_override is not None
+        and str(eval_dataset_override) != eval_dataset_ckpt
+    ):
+        raise ValueError(
+            "Test eval_dataset override is not allowed. "
+            f"Checkpoint expects '{eval_dataset_ckpt}', got '{eval_dataset_override}'."
+        )
+    eval_dataset = eval_dataset_ckpt
 
     test_split = str(OmegaConf.select(cfg, "test_split") or "test")
     test_loader = get_dataloader(
@@ -241,23 +314,49 @@ def main(cfg: DictConfig) -> None:
     model.load_state_dict(checkpoint_state)
     model.eval()
 
-    supervision_mode = str(
-        OmegaConf.select(train_cfg, "train.supervision.mode") or "dense"
+    supervision_mode, center_crop_size = resolve_supervision_config(train_cfg)
+    predictor_validity_mode, predictor_min_finite_ratio = (
+        resolve_predictor_validity_config(train_cfg)
     )
-    center_crop_size = int(
-        OmegaConf.select(train_cfg, "train.supervision.center_crop_size") or 3
-    )
-    predictor_validity_mode = str(
-        OmegaConf.select(train_cfg, "train.predictor_validity.mode") or "min_fraction"
-    )
-    predictor_min_finite_ratio = float(
-        OmegaConf.select(train_cfg, "train.predictor_validity.min_finite_ratio") or 0.2
-    )
+
+    cfg_supervision_mode = OmegaConf.select(cfg, "train.supervision.mode")
+    if (
+        cfg_supervision_mode is not None
+        and str(cfg_supervision_mode) != supervision_mode
+    ):
+        raise AssertionError(
+            "train.supervision.mode must match the checkpoint training config during test."
+        )
+    cfg_center_crop_size = OmegaConf.select(cfg, "train.supervision.center_crop_size")
+    if (
+        cfg_center_crop_size is not None
+        and int(cfg_center_crop_size) != center_crop_size
+    ):
+        raise AssertionError(
+            "train.supervision.center_crop_size must match the checkpoint training config during test."
+        )
+
+    if supervision_mode == "dense":
+        console.print(
+            "[yellow]Dense supervision with overlapping chips can duplicate target pixels in "
+            "loss/metrics. Use only as an ablation unless unique-pixel de-duplication is implemented.[/yellow]"
+        )
+    if supervision_mode == "center_crop":
+        console.print(
+            "[yellow]Center-crop supervision uses only the central crop for loss/metrics; "
+            "outer patch pixels provide context only.[/yellow]"
+        )
 
     all_y_true: list[np.ndarray] = []
     all_y_pred: list[np.ndarray] = []
     all_valid: list[np.ndarray] = []
     skipped_batches = 0
+
+    source_counts_per_trait: dict[str, dict[str, int]] = {
+        trait: {"n_valid_splot": 0, "n_valid_gbif": 0} for trait in traits
+    }
+    n_valid_splot = 0
+    n_valid_gbif = 0
 
     with torch.no_grad():
         for X, bundle in track(
@@ -272,10 +371,33 @@ def main(cfg: DictConfig) -> None:
                 center_crop_size=center_crop_size,
                 predictor_validity_mode=predictor_validity_mode,
                 predictor_min_finite_ratio=predictor_min_finite_ratio,
+                context="test",
             )
             if bundle is None:
                 skipped_batches += 1
                 continue
+
+            splot_payload = bundle.get("splot")
+            if splot_payload is not None:
+                n_valid_splot += _update_source_counts(
+                    source_counts_per_trait=source_counts_per_trait,
+                    source_key="n_valid_splot",
+                    payload=splot_payload,
+                    y_pred=y_pred,
+                    traits=traits,
+                    n_bands=len(bands),
+                )
+
+            gbif_payload = bundle.get("gbif")
+            if gbif_payload is not None:
+                n_valid_gbif += _update_source_counts(
+                    source_counts_per_trait=source_counts_per_trait,
+                    source_key="n_valid_gbif",
+                    payload=gbif_payload,
+                    y_pred=y_pred,
+                    traits=traits,
+                    n_bands=len(bands),
+                )
 
             eval_payload = bundle.get(eval_dataset)
             if eval_payload is None:
@@ -316,13 +438,27 @@ def main(cfg: DictConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = checkpoint_path.stem
 
+    if supervision_mode == "center_pixel":
+        count_semantics = "Counts refer to supervised center-cell observations."
+    elif supervision_mode == "center_crop":
+        count_semantics = "Counts refer to supervised center-crop pixel observations."
+    else:
+        count_semantics = "Counts refer to dense supervised pixel observations; overlapping chips can duplicate targets."
+
     compact_metrics = {
         "checkpoint": str(checkpoint_path),
         "split": test_split,
         "mode": str(target_layout["mode"]),
         "target_mode": str(target_layout["mode"]),
         "eval_dataset": eval_dataset,
+        "supervision_mode": supervision_mode,
+        "center_crop_size": int(center_crop_size),
+        "predictor_validity_mode": predictor_validity_mode,
+        "predictor_min_finite_ratio": float(predictor_min_finite_ratio),
+        "count_semantics": count_semantics,
         "n_valid": int(metric_summary["n_valid"]),
+        "n_valid_splot": int(n_valid_splot),
+        "n_valid_gbif": int(n_valid_gbif),
         "skipped_batches": int(skipped_batches),
         "rmse": float(metric_summary["rmse"]),
         "r2": float(metric_summary["r2"]),
@@ -339,6 +475,7 @@ def main(cfg: DictConfig) -> None:
     full_metrics = {
         **compact_metrics,
         "trait_metrics": _to_python_scalars(metric_summary["trait_metrics"]),
+        "trait_source_counts": _to_python_scalars(source_counts_per_trait),
     }
     full_path = output_dir / f"{stem}.test_metrics_full.json"
     full_path.write_text(json.dumps(full_metrics, indent=2), encoding="utf-8")
@@ -357,6 +494,8 @@ def main(cfg: DictConfig) -> None:
                     "eval_dataset",
                     "trait",
                     "n_valid",
+                    "n_valid_splot",
+                    "n_valid_gbif",
                     "rmse",
                     "r2",
                     "pearson_r",
@@ -374,6 +513,8 @@ def main(cfg: DictConfig) -> None:
                     eval_dataset,
                     trait_name,
                     metrics["n_valid"],
+                    source_counts_per_trait[trait_name]["n_valid_splot"],
+                    source_counts_per_trait[trait_name]["n_valid_gbif"],
                     metrics["rmse"],
                     metrics["r2"],
                     metrics["pearson_r"],
@@ -417,6 +558,7 @@ def main(cfg: DictConfig) -> None:
                     center_crop_size=center_crop_size,
                     predictor_validity_mode=predictor_validity_mode,
                     predictor_min_finite_ratio=predictor_min_finite_ratio,
+                    context="all_map",
                 )
                 y_pred_map = torch.where(
                     valid_x.expand_as(y_pred_map),
@@ -441,6 +583,8 @@ def main(cfg: DictConfig) -> None:
     console.print(f"mode:       [cyan]{target_layout['mode']}[/cyan]")
     console.print(f"eval_data:  [cyan]{eval_dataset}[/cyan]")
     console.print(f"n_valid:    [cyan]{compact_metrics['n_valid']}[/cyan]")
+    console.print(f"n_valid_splot: [cyan]{compact_metrics['n_valid_splot']}[/cyan]")
+    console.print(f"n_valid_gbif:  [cyan]{compact_metrics['n_valid_gbif']}[/cyan]")
     console.print(f"macro_rmse: [cyan]{compact_metrics['macro_rmse']:.6f}[/cyan]")
     console.print(f"macro_r2:   [cyan]{compact_metrics['macro_r2']:.6f}[/cyan]")
     console.print(f"macro_r:    [cyan]{compact_metrics['macro_pearson_r']:.6f}[/cyan]")

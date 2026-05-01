@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import hydra
+import numpy as np
 import torch
 import zarr
 from hydra.utils import instantiate
@@ -14,11 +15,17 @@ from rich.progress import track
 from ptev2.data.dataloader import get_dataloader
 from ptev2.metrics.evaluation import summarize_single_trait_metrics
 from ptev2.utils import (
+    apply_supervision_bundle,
+    apply_supervision_tensor,
+    assert_supervision_shape,
     build_target_layout,
+    mask_bundle_targets_with_validity,
     move_bundle_to_device,
     predict_batch,
     resolve_device,
     resolve_model_cfg,
+    resolve_predictor_validity_config,
+    resolve_supervision_config,
     resolve_train_zarr_dir,
     seed_all,
 )
@@ -58,12 +65,56 @@ def _is_better(current: float, best: float, mode: str, min_delta: float) -> bool
     raise ValueError("train.selection.mode must be 'max' or 'min'.")
 
 
-def _center_pixel(t: torch.Tensor) -> torch.Tensor:
-    h = t.shape[-2]
-    w = t.shape[-1]
-    cy = h // 2
-    cx = w // 2
-    return t[..., cy : cy + 1, cx : cx + 1]
+def _prepare_supervised_batch(
+    *,
+    model: torch.nn.Module,
+    X: torch.Tensor,
+    bundle: dict[str, dict[str, torch.Tensor]],
+    device: torch.device,
+    supervision_mode: str,
+    center_crop_size: int,
+    predictor_validity_mode: str,
+    predictor_min_finite_ratio: float,
+    context: str,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, dict[str, torch.Tensor]]]:
+    X = X.to(device, dtype=torch.float32)
+    bundle = move_bundle_to_device(bundle, device)
+    y_pred, valid_x = predict_batch(
+        model,
+        X,
+        validity_mode=predictor_validity_mode,
+        min_finite_ratio=predictor_min_finite_ratio,
+    )
+    y_pred = apply_supervision_tensor(y_pred, supervision_mode, center_crop_size)
+    valid_x = apply_supervision_tensor(valid_x, supervision_mode, center_crop_size)
+    assert_supervision_shape(
+        y_pred,
+        mode=supervision_mode,
+        center_crop_size=center_crop_size,
+        context=f"{context}/y_pred",
+    )
+    assert_supervision_shape(
+        valid_x,
+        mode=supervision_mode,
+        center_crop_size=center_crop_size,
+        context=f"{context}/valid_x",
+    )
+    bundle = apply_supervision_bundle(bundle, supervision_mode, center_crop_size)
+    bundle = mask_bundle_targets_with_validity(bundle, valid_x)
+    for dataset_name, payload in bundle.items():
+        assert_supervision_shape(
+            payload["y"],
+            mode=supervision_mode,
+            center_crop_size=center_crop_size,
+            context=f"{context}/{dataset_name}/y",
+        )
+        assert_supervision_shape(
+            payload["source_mask"],
+            mode=supervision_mode,
+            center_crop_size=center_crop_size,
+            context=f"{context}/{dataset_name}/source_mask",
+        )
+    return y_pred, valid_x, bundle
 
 
 @hydra.main(
@@ -162,14 +213,51 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.select(cfg, "train.selection.metric") or "val_splot_macro_pearson"
     )
     selection_mode = str(OmegaConf.select(cfg, "train.selection.mode") or "max")
+    if not selection_metric_name.startswith("val_splot_"):
+        raise ValueError(
+            "Model selection must use sPlot validation metrics. "
+            "Use val_splot_macro_pearson|val_splot_macro_rmse|val_splot_rmse|val_splot_loss."
+        )
 
     primary_ds = str(OmegaConf.select(cfg, "data.targets.primary_dataset") or "splot")
     aux_ds = str(OmegaConf.select(cfg, "data.targets.auxiliary_dataset") or "gbif")
-    w_splot = float(OmegaConf.select(cfg, "train.loss.w_splot") or 1.0)
-    w_gbif = float(OmegaConf.select(cfg, "train.loss.w_gbif") or 0.1)
+    w_splot = float(
+        OmegaConf.select(cfg, "train.source_weights.splot")
+        or OmegaConf.select(cfg, "train.loss.w_splot")
+        or 1.0
+    )
+    w_gbif = float(
+        OmegaConf.select(cfg, "train.source_weights.gbif")
+        or OmegaConf.select(cfg, "train.loss.w_gbif")
+        or 0.1
+    )
+    supervision_mode, center_crop_size = resolve_supervision_config(cfg)
+    predictor_validity_mode, predictor_min_finite_ratio = (
+        resolve_predictor_validity_config(cfg)
+    )
+
+    console.print(f"Supervision mode: [cyan]{supervision_mode}[/cyan]")
+    console.print(f"Center crop size: [cyan]{center_crop_size}[/cyan]")
+    console.print(f"Predictor validity mode: [cyan]{predictor_validity_mode}[/cyan]")
+    console.print(
+        f"Predictor min_finite_ratio: [cyan]{predictor_min_finite_ratio:.3f}[/cyan]"
+    )
+    if supervision_mode == "dense":
+        console.print(
+            "[yellow]Dense supervision with overlapping chips can duplicate target pixels in "
+            "loss/metrics. Use only as an ablation unless unique-pixel de-duplication is implemented.[/yellow]"
+        )
+    if supervision_mode == "center_crop":
+        console.print(
+            "[yellow]Center-crop supervision uses only the central crop for loss/metrics; "
+            "outer patch pixels provide context only.[/yellow]"
+        )
 
     lb_weight = float(OmegaConf.select(cfg, "mmoe.load_balance_weight") or 0.0)
     gc_weight = float(OmegaConf.select(cfg, "mmoe.group_consistency_weight") or 0.0)
+    low_support_threshold = int(
+        OmegaConf.select(cfg, "train.validation.low_support_threshold") or 30
+    )
 
     trait_group_indices: list[list[int]] | None = None
     trait_groups_ids = OmegaConf.select(cfg, "mmoe.trait_groups", default=None)
@@ -230,33 +318,50 @@ def main(cfg: DictConfig) -> None:
         model.train()
         train_splot_num = train_splot_den = 0.0
         train_gbif_num = train_gbif_den = 0.0
+        logged_train_supervision_shape = False
 
         for X, bundle in track(train_loader, description="Training"):
-            X = X.to(device, dtype=torch.float32)
-            bundle = move_bundle_to_device(bundle, device)
-            y_pred, valid_x = predict_batch(
-                model, X, validity_mode="min_fraction", min_finite_ratio=0.2
+            y_pred, _, bundle = _prepare_supervised_batch(
+                model=model,
+                X=X,
+                bundle=bundle,
+                device=device,
+                supervision_mode=supervision_mode,
+                center_crop_size=center_crop_size,
+                predictor_validity_mode=predictor_validity_mode,
+                predictor_min_finite_ratio=predictor_min_finite_ratio,
+                context="train",
             )
+            if supervision_mode != "dense" and tuple(y_pred.shape[-2:]) == tuple(
+                x0.shape[-2:]
+            ):
+                raise AssertionError(
+                    "Dense training loss is not allowed unless train.supervision.mode == 'dense'."
+                )
 
             p_payload = bundle.get(primary_ds)
             a_payload = bundle.get(aux_ds)
-            if p_payload is None or a_payload is None:
-                raise ValueError("Missing primary/aux dataset payload.")
-
-            # mask targets where predictors are invalid
-            p_y = torch.where(
-                valid_x.expand_as(p_payload["y"]), p_payload["y"], torch.nan
-            )
-            a_y = torch.where(
-                valid_x.expand_as(a_payload["y"]), a_payload["y"], torch.nan
-            )
+            if p_payload is None:
+                raise ValueError("Missing primary dataset payload.")
+            if not logged_train_supervision_shape:
+                console.print(
+                    "Training supervised shapes: "
+                    f"y_pred={tuple(y_pred.shape)} "
+                    f"splot_y={tuple(p_payload['y'].shape)} "
+                    f"splot_source_mask={tuple(p_payload['source_mask'].shape)}"
+                )
+                logged_train_supervision_shape = True
 
             p_num, p_den = loss_fn.loss_components(
-                y_pred, p_y, p_payload["source_mask"]
+                y_pred, p_payload["y"], p_payload["source_mask"]
             )
-            a_num, a_den = loss_fn.loss_components(
-                y_pred, a_y, a_payload["source_mask"]
-            )
+            if a_payload is not None:
+                a_num, a_den = loss_fn.loss_components(
+                    y_pred, a_payload["y"], a_payload["source_mask"]
+                )
+            else:
+                zero = y_pred.sum() * 0.0
+                a_num, a_den = zero, zero
 
             zero = y_pred.sum() * 0.0
             p_loss = p_num / p_den if bool((p_den > 0).item()) else zero
@@ -310,33 +415,48 @@ def main(cfg: DictConfig) -> None:
         val_y_true_parts = []
         val_y_pred_parts = []
         val_valid_parts = []
+        val_gbif_true_parts = []
+        val_gbif_pred_parts = []
+        val_gbif_valid_parts = []
+        logged_val_supervision_shape = False
 
         with torch.no_grad():
             for X, bundle in track(val_loader, description="Validation"):
-                X = X.to(device, dtype=torch.float32)
-                bundle = move_bundle_to_device(bundle, device)
-                y_pred, valid_x = predict_batch(
-                    model, X, validity_mode="min_fraction", min_finite_ratio=0.2
+                y_pred, _, bundle = _prepare_supervised_batch(
+                    model=model,
+                    X=X,
+                    bundle=bundle,
+                    device=device,
+                    supervision_mode=supervision_mode,
+                    center_crop_size=center_crop_size,
+                    predictor_validity_mode=predictor_validity_mode,
+                    predictor_min_finite_ratio=predictor_min_finite_ratio,
+                    context="val",
                 )
 
                 p_payload = bundle.get(primary_ds)
                 a_payload = bundle.get(aux_ds)
-                if p_payload is None or a_payload is None:
-                    raise ValueError("Missing primary/aux dataset payload.")
-
-                p_y = torch.where(
-                    valid_x.expand_as(p_payload["y"]), p_payload["y"], torch.nan
-                )
-                a_y = torch.where(
-                    valid_x.expand_as(a_payload["y"]), a_payload["y"], torch.nan
-                )
+                if p_payload is None:
+                    raise ValueError("Missing primary dataset payload.")
+                if not logged_val_supervision_shape:
+                    console.print(
+                        "Validation supervised shapes: "
+                        f"y_pred={tuple(y_pred.shape)} "
+                        f"splot_y={tuple(p_payload['y'].shape)} "
+                        f"splot_source_mask={tuple(p_payload['source_mask'].shape)}"
+                    )
+                    logged_val_supervision_shape = True
 
                 p_num, p_den = loss_fn.loss_components(
-                    y_pred, p_y, p_payload["source_mask"]
+                    y_pred, p_payload["y"], p_payload["source_mask"]
                 )
-                a_num, a_den = loss_fn.loss_components(
-                    y_pred, a_y, a_payload["source_mask"]
-                )
+                if a_payload is not None:
+                    a_num, a_den = loss_fn.loss_components(
+                        y_pred, a_payload["y"], a_payload["source_mask"]
+                    )
+                else:
+                    zero = y_pred.sum() * 0.0
+                    a_num, a_den = zero, zero
 
                 if bool((p_den > 0).item()):
                     val_splot_num += p_num.item()
@@ -345,24 +465,26 @@ def main(cfg: DictConfig) -> None:
                     val_gbif_num += a_num.item()
                     val_gbif_den += a_den.item()
 
-                eval_payload = bundle.get(eval_dataset)
-                if eval_payload is None:
-                    continue
-
-                # train_chips-like validation logic: center pixel Pearson-R on SPLOT
-                y_eval_c = _center_pixel(eval_payload["y"])
-                src_eval_c = _center_pixel(eval_payload["source_mask"])
-                y_pred_c = _center_pixel(y_pred)
-                valid_eval = (
-                    torch.isfinite(y_eval_c)
-                    & torch.isfinite(y_pred_c)
-                    & (src_eval_c > 0)
-                    & _center_pixel(valid_x).expand_as(y_eval_c)
+                valid_splot = (
+                    torch.isfinite(p_payload["y"])
+                    & torch.isfinite(y_pred)
+                    & (p_payload["source_mask"] > 0)
                 )
-                if bool(valid_eval.any()):
-                    val_y_true_parts.append(y_eval_c.detach().cpu())
-                    val_y_pred_parts.append(y_pred_c.detach().cpu())
-                    val_valid_parts.append(valid_eval.detach().cpu())
+                if bool(valid_splot.any()):
+                    val_y_true_parts.append(p_payload["y"].detach().cpu())
+                    val_y_pred_parts.append(y_pred.detach().cpu())
+                    val_valid_parts.append(valid_splot.detach().cpu())
+
+                if a_payload is not None:
+                    valid_gbif = (
+                        torch.isfinite(a_payload["y"])
+                        & torch.isfinite(y_pred)
+                        & (a_payload["source_mask"] > 0)
+                    )
+                    if bool(valid_gbif.any()):
+                        val_gbif_true_parts.append(a_payload["y"].detach().cpu())
+                        val_gbif_pred_parts.append(y_pred.detach().cpu())
+                        val_gbif_valid_parts.append(valid_gbif.detach().cpu())
 
         val_splot_loss = (
             val_splot_num / val_splot_den if val_splot_den > 0 else float("nan")
@@ -372,12 +494,41 @@ def main(cfg: DictConfig) -> None:
         )
 
         val_summary = None
+        val_support_summary = None
         if val_y_true_parts:
             val_summary = summarize_single_trait_metrics(
                 y_true=torch.cat(val_y_true_parts, dim=0),
                 y_pred=torch.cat(val_y_pred_parts, dim=0),
                 source_mask=None,
                 valid_mask=torch.cat(val_valid_parts, dim=0),
+                trait_names=traits,
+                n_bands=len(bands),
+            )
+            trait_n_valid = np.asarray(
+                [
+                    int(metrics["n_valid"])
+                    for metrics in val_summary["trait_metrics"].values()
+                ],
+                dtype=np.int64,
+            )
+            val_support_summary = {
+                "min": int(trait_n_valid.min()),
+                "p25": int(np.percentile(trait_n_valid, 25)),
+                "median": int(np.median(trait_n_valid)),
+                "p75": int(np.percentile(trait_n_valid, 75)),
+                "max": int(trait_n_valid.max()),
+                "n_traits_below_threshold": int(
+                    (trait_n_valid < low_support_threshold).sum()
+                ),
+            }
+
+        val_gbif_summary = None
+        if val_gbif_true_parts:
+            val_gbif_summary = summarize_single_trait_metrics(
+                y_true=torch.cat(val_gbif_true_parts, dim=0),
+                y_pred=torch.cat(val_gbif_pred_parts, dim=0),
+                source_mask=None,
+                valid_mask=torch.cat(val_gbif_valid_parts, dim=0),
                 trait_names=traits,
                 n_bands=len(bands),
             )
@@ -424,6 +575,17 @@ def main(cfg: DictConfig) -> None:
             f"val_splot_loss={val_splot_loss:.5f} val_gbif_loss={val_gbif_loss:.5f} "
             f"sel={selection_value:.5f} lr={current_lr:.2e}"
         )
+        if val_support_summary is not None:
+            console.print(
+                "val_support(splot): "
+                f"min={val_support_summary['min']} "
+                f"p25={val_support_summary['p25']} "
+                f"median={val_support_summary['median']} "
+                f"p75={val_support_summary['p75']} "
+                f"max={val_support_summary['max']} "
+                f"traits_below_{low_support_threshold}="
+                f"{val_support_summary['n_traits_below_threshold']}"
+            )
 
         if cfg.wandb.enabled and wandb_module is not None:
             log_dict: dict[str, Any] = {
@@ -431,12 +593,10 @@ def main(cfg: DictConfig) -> None:
                 "train/splot_loss": train_splot_loss,
                 "train/gbif_loss": train_gbif_loss,
                 "train/lr": current_lr,
-                # Backward-compatible top-level keys (origin/dev style)
                 "val/loss": val_splot_loss,
                 "val/mean_r": float("nan")
                 if val_summary is None
                 else float(val_summary["macro_pearson_r"]),
-                # Current pipeline keys
                 "val/splot_loss": val_splot_loss,
                 "val/gbif_loss": val_gbif_loss,
                 "val/selection": selection_value,
@@ -455,8 +615,30 @@ def main(cfg: DictConfig) -> None:
                         "val/splot/macro_pearson_r": val_summary["macro_pearson_r"],
                     }
                 )
+                if val_support_summary is not None:
+                    log_dict.update(
+                        {
+                            "val/splot/per_trait_n_valid_min": val_support_summary[
+                                "min"
+                            ],
+                            "val/splot/per_trait_n_valid_p25": val_support_summary[
+                                "p25"
+                            ],
+                            "val/splot/per_trait_n_valid_median": val_support_summary[
+                                "median"
+                            ],
+                            "val/splot/per_trait_n_valid_p75": val_support_summary[
+                                "p75"
+                            ],
+                            "val/splot/per_trait_n_valid_max": val_support_summary[
+                                "max"
+                            ],
+                            f"val/splot/per_trait_n_valid_n_below_{low_support_threshold}": val_support_summary[
+                                "n_traits_below_threshold"
+                            ],
+                        }
+                    )
 
-                # Origin/dev dashboard structure
                 for trait_name, m in trait_metrics.items():
                     if math.isfinite(float(m["pearson_r"])):
                         log_dict[f"val/per_trait_r.X{trait_name}"] = float(
@@ -465,6 +647,17 @@ def main(cfg: DictConfig) -> None:
 
                 if improved:
                     log_dict["val/mean_r_best"] = float(val_summary["macro_pearson_r"])
+
+            if val_gbif_summary is not None:
+                log_dict.update(
+                    {
+                        "val/gbif/rmse": val_gbif_summary["rmse"],
+                        "val/gbif/r2": val_gbif_summary["r2"],
+                        "val/gbif/pearson_r": val_gbif_summary["pearson_r"],
+                        "val/gbif/macro_rmse": val_gbif_summary["macro_rmse"],
+                        "val/gbif/macro_pearson_r": val_gbif_summary["macro_pearson_r"],
+                    }
+                )
 
             if is_best_loss:
                 log_dict["val/loss_best"] = best_val_loss

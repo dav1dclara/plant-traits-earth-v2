@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ptev2.models.traitPatchCNN import ResidualBlock, _make_norm
+from ptev2.models.traitPatchCNN import ResidualBlock, _make_activation, _make_norm
 
 
 class InputPCA(nn.Module):
@@ -65,6 +65,7 @@ class SharedEncoder(nn.Module):
         in_channels: int,
         base_channels: int = 32,
         norm: Literal["bn", "gn", "none"] = "gn",
+        activation: Literal["prelu", "silu", "gelu"] = "prelu",
         gn_groups: int = 8,
         stride_blocks: tuple[int, int, int, int] = (1, 1, 1, 1),
         dropout_p: float = 0.0,
@@ -84,16 +85,40 @@ class SharedEncoder(nn.Module):
         c3 = base_channels * 4
 
         self.block1 = ResidualBlock(
-            effective_in, c1, stride_blocks[0], norm, gn_groups, dropout_p
+            effective_in,
+            c1,
+            stride_blocks[0],
+            norm,
+            gn_groups,
+            dropout_p,
+            activation=activation,
         )
         self.block2 = ResidualBlock(
-            c1, c1, stride_blocks[1], norm, gn_groups, dropout_p
+            c1,
+            c1,
+            stride_blocks[1],
+            norm,
+            gn_groups,
+            dropout_p,
+            activation=activation,
         )
         self.block3 = ResidualBlock(
-            c1, c2, stride_blocks[2], norm, gn_groups, dropout_p
+            c1,
+            c2,
+            stride_blocks[2],
+            norm,
+            gn_groups,
+            dropout_p,
+            activation=activation,
         )
         self.block4 = ResidualBlock(
-            c2, c3, stride_blocks[3], norm, gn_groups, dropout_p
+            c2,
+            c3,
+            stride_blocks[3],
+            norm,
+            gn_groups,
+            dropout_p,
+            activation=activation,
         )
         self.out_channels = c3
 
@@ -128,6 +153,7 @@ class STLModel(nn.Module):
         n_traits: int | None = None,
         base_channels: int = 32,
         norm: Literal["bn", "gn", "none"] = "gn",
+        activation: Literal["prelu", "silu", "gelu"] = "prelu",
         gn_groups: int = 8,
         stride_blocks: tuple[int, int, int, int] = (1, 1, 1, 1),
         dropout_p: float = 0.0,
@@ -140,6 +166,7 @@ class STLModel(nn.Module):
             in_channels,
             base_channels,
             norm,
+            activation,
             gn_groups,
             stride_blocks,
             dropout_p,
@@ -171,6 +198,7 @@ class MTLModel(nn.Module):
         n_traits: int | None = None,
         base_channels: int = 32,
         norm: Literal["bn", "gn", "none"] = "gn",
+        activation: Literal["prelu", "silu", "gelu"] = "prelu",
         gn_groups: int = 8,
         stride_blocks: tuple[int, int, int, int] = (1, 1, 1, 1),
         dropout_p: float = 0.0,
@@ -184,6 +212,7 @@ class MTLModel(nn.Module):
             in_channels,
             base_channels,
             norm,
+            activation,
             gn_groups,
             stride_blocks,
             dropout_p,
@@ -198,7 +227,7 @@ class MTLModel(nn.Module):
             self.shared_head = None
             self.heads = nn.ModuleList(
                 [
-                    DeeperTaskHead(c3, 1, norm, gn_groups, dropout_p)
+                    DeeperTaskHead(c3, 1, norm, activation, gn_groups, dropout_p)
                     for _ in range(out_channels)
                 ]
             )
@@ -207,7 +236,7 @@ class MTLModel(nn.Module):
             self.shared_head = nn.Sequential(
                 nn.Conv2d(c3, c3, kernel_size=3, padding=1, bias=False),
                 _make_norm(norm, c3, gn_groups),
-                nn.PReLU(num_parameters=c3),
+                _make_activation(activation, c3),
                 nn.Dropout2d(dropout_p) if dropout_p > 0 else nn.Identity(),
             )
             self.heads = nn.ModuleList([TaskHead(c3, 1) for _ in range(out_channels)])
@@ -277,6 +306,7 @@ class DenseMMoELayer(nn.Module):
         expert_hidden: int = 64,
         n_tasks: int = 31,
         norm: Literal["bn", "gn", "none"] = "gn",
+        activation: Literal["prelu", "silu", "gelu"] = "prelu",
         gn_groups: int = 8,
         dropout_p: float = 0.0,
         gate_temperature: float = 1.0,
@@ -295,6 +325,7 @@ class DenseMMoELayer(nn.Module):
                     expert_hidden,
                     stride=1,
                     norm=norm,
+                    activation=activation,
                     gn_groups=gn_groups,
                     dropout_p=dropout_p,
                 )
@@ -359,6 +390,7 @@ class GatedMMoEModel(nn.Module):
         n_traits: int | None = None,
         base_channels: int = 32,
         norm: Literal["bn", "gn", "none"] = "gn",
+        activation: Literal["prelu", "silu", "gelu"] = "prelu",
         gn_groups: int = 8,
         stride_blocks: tuple[int, int, int, int] = (1, 1, 1, 1),
         dropout_p: float = 0.0,
@@ -376,6 +408,7 @@ class GatedMMoEModel(nn.Module):
             in_channels,
             base_channels,
             norm,
+            activation,
             gn_groups,
             stride_blocks,
             dropout_p,
@@ -391,6 +424,7 @@ class GatedMMoEModel(nn.Module):
             expert_hidden=expert_hidden,
             n_tasks=out_channels,
             norm=norm,
+            activation=activation,
             gn_groups=gn_groups,
             dropout_p=dropout_p,
             gate_temperature=gate_temperature,
@@ -401,7 +435,7 @@ class GatedMMoEModel(nn.Module):
         self.shared_projection = nn.Sequential(
             nn.Conv2d(c3, expert_hidden, kernel_size=1, bias=False),
             _make_norm(norm, expert_hidden, gn_groups),
-            nn.PReLU(num_parameters=expert_hidden),
+            _make_activation(activation, expert_hidden),
         )
 
         self.heads = nn.ModuleList(
@@ -441,6 +475,7 @@ class DeeperTaskHead(nn.Module):
         in_channels: int,
         out_channels: int = 1,
         norm: Literal["bn", "gn", "none"] = "gn",
+        activation: Literal["prelu", "silu", "gelu"] = "prelu",
         gn_groups: int = 8,
         dropout_p: float = 0.0,
     ) -> None:
@@ -448,7 +483,7 @@ class DeeperTaskHead(nn.Module):
         self.head = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
             _make_norm(norm, in_channels, gn_groups),
-            nn.PReLU(num_parameters=in_channels),
+            _make_activation(activation, in_channels),
             nn.Dropout2d(dropout_p) if dropout_p > 0 else nn.Identity(),
             nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=True),
         )
@@ -507,6 +542,7 @@ class GatedMMoEModelV3(nn.Module):
         n_traits: int | None = None,
         base_channels: int = 32,
         norm: Literal["bn", "gn", "none"] = "gn",
+        activation: Literal["prelu", "silu", "gelu"] = "prelu",
         gn_groups: int = 8,
         stride_blocks: tuple[int, int, int, int] = (1, 1, 1, 1),
         dropout_p: float = 0.0,
@@ -527,6 +563,7 @@ class GatedMMoEModelV3(nn.Module):
             in_channels,
             base_channels,
             norm,
+            activation,
             gn_groups,
             stride_blocks,
             dropout_p,
@@ -542,6 +579,7 @@ class GatedMMoEModelV3(nn.Module):
             expert_hidden=expert_hidden,
             n_tasks=out_channels,
             norm=norm,
+            activation=activation,
             gn_groups=gn_groups,
             dropout_p=dropout_p,
             gate_temperature=gate_temperature,
@@ -553,7 +591,7 @@ class GatedMMoEModelV3(nn.Module):
             self.shared_projection = nn.Sequential(
                 nn.Conv2d(c3, expert_hidden, kernel_size=1, bias=False),
                 _make_norm(norm, expert_hidden, gn_groups),
-                nn.PReLU(num_parameters=expert_hidden),
+                _make_activation(activation, expert_hidden),
             )
         else:
             self.shared_projection = None
@@ -561,7 +599,14 @@ class GatedMMoEModelV3(nn.Module):
         # Deeper task heads — matches ResPatchCNN head capacity
         self.heads = nn.ModuleList(
             [
-                DeeperTaskHead(expert_hidden, 1, norm, gn_groups, dropout_p)
+                DeeperTaskHead(
+                    expert_hidden,
+                    1,
+                    norm,
+                    activation,
+                    gn_groups,
+                    dropout_p,
+                )
                 for _ in range(out_channels)
             ]
         )

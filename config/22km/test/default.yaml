@@ -1,6 +1,7 @@
 run_name: null
 checkpoint_path: null
 checkpoint_dir: /scratch3/plant-traits-v2/checkpoints/
+zarr_dir: /scratch3/plant-traits-v2/data/22km/chips/patch7_stride3
 output_dir: /scratch3/plant-traits-v2/test_outputs/
 prediction_out_dir: /scratch3/plant-traits-v2/predictions/
 prediction_tif_name: null

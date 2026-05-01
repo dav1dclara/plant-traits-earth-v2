@@ -57,3 +57,16 @@ The script slides a window of `patch_size × patch_size` pixels across all raste
 Patch size, stride, data paths, and which predictors/targets to include are controlled via `config/chipping/default.yaml`.
 
 ## Model training
+
+### Supervision protocol
+
+- 22 km benchmark: patch-context / center-pixel supervision.
+  The model sees a spatial predictor patch, but training/validation/testing loss and metrics are computed only on the center target cell.
+- Future 1 km benchmark: patch-context / center-crop supervision.
+  The model sees a larger patch, and loss/metrics are computed on a central supervised crop (for example `center_crop_size: 32`), while outer pixels provide context only.
+- sPlot and GBIF are treated as separate supervision sources.
+  sPlot is primary ground truth; GBIF is auxiliary weak supervision.
+  They are not collapsed into one merged target.
+  We train a source-aware CNN using sPlot as the primary supervised source and GBIF as a down-weighted auxiliary source, and we validate/test against held-out sPlot.
+- Dense supervision is supported only as an ablation.
+  With overlapping chips, dense mode can duplicate target pixels unless unique-pixel de-duplication is implemented.

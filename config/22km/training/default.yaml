@@ -6,8 +6,8 @@ defaults:
 data:
   root_dir: /scratch3/plant-traits-v2/data/
   resolution_km: 22
-  chips_dirname: chips_luca_new
-  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips_luca_new/patch7_stride3
+  chips_dirname: chips
+  zarr_dir: /scratch3/plant-traits-v2/data/22km/chips/patch7_stride3
   patch_size: 7
   stride: 3
 
@@ -24,7 +24,7 @@ data:
       use: true
 
   targets:
-    mode: dual_source_single_head
+    mode: source_weighted
     primary_dataset: splot
     auxiliary_dataset: gbif
     eval_dataset: splot
@@ -61,9 +61,23 @@ train:
     step_size: 15
     gamma: 0.7
 
+  supervision:
+    mode: center_pixel
+    center_crop_size: 1
+
+  predictor_validity:
+    mode: min_fraction
+    min_finite_ratio: 0.2
+
+  source_weights:
+    splot: 1.0
+    gbif: 0.1
+
+  eval_dataset: splot
+
   selection:
-    metric: val_splot_macro_pearson
-    mode: max
+    metric: val_splot_macro_rmse
+    mode: min
 
   gradient_clip_norm: 1.0
 
