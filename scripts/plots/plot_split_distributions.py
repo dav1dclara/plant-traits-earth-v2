@@ -138,9 +138,15 @@ def main() -> None:
                 footer=f"{totals[split]:,}",
             )
         for i, trait in enumerate(traits):
+            trait_total = sum(hists[split][i].sum() for split in SPLIT_COLORS)
+
+            def fmt(count: float, total: float) -> str:
+                pct = count / total * 100 if total > 0 else 0
+                return f"{int(count):,} ({pct:.0f}%)"
+
             table.add_row(
                 trait,
-                *[f"{int(hists[split][i].sum()):,}" for split in SPLIT_COLORS],
+                *[fmt(hists[split][i].sum(), trait_total) for split in SPLIT_COLORS],
             )
         console.print(table)
 
@@ -177,14 +183,17 @@ def main() -> None:
                 continue
             centers = (edge[:-1] + edge[1:]) / 2
             bin_width = edge[1] - edge[0]
+            total_pixels = sum(hists[split][trait_idx].sum() for split in SPLIT_COLORS)
             for split, color in SPLIT_COLORS.items():
                 h = hists[split][trait_idx]
                 total = h.sum()
                 if total == 0:
                     continue
+                pct = total / total_pixels * 100 if total_pixels > 0 else 0
+                label = f"{split} ({int(total):,}, {pct:.0f}%)"
                 y = h / (total * bin_width)
                 ax.step(
-                    centers, y, color=color, label=split, linewidth=1.2, where="mid"
+                    centers, y, color=color, label=label, linewidth=1.2, where="mid"
                 )
             ax.spines[["top", "right"]].set_visible(False)
             ax.set_xlabel("value")
