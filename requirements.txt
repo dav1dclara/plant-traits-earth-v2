@@ -18,3 +18,4 @@ pyarrow
 h3
 antimeridian
 rich
+earthengine-api
