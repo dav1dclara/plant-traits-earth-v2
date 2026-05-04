@@ -34,8 +34,8 @@ console = Console()
 
 @hydra.main(
     version_base=None,
-    config_path="../../../config/1km",
-    config_name="splitting",
+    config_path="../../../config/22km/preprocessing",
+    config_name="splitting_new",
 )
 def main(cfg: DictConfig) -> None:
     # Data config
@@ -81,7 +81,7 @@ def main(cfg: DictConfig) -> None:
     console.print(f"Random seed:    [cyan]{random_seed}[/cyan]")
     console.print()
 
-    out_dir = data_dir / f"{resolution_km}km" / "splits"
+    out_dir = data_dir / f"{resolution_km}km" / "splits_david"
     out_file = out_dir / f"h3_splits_res{h3_resolution}_{resolution_km}km.gpkg"
     out_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"Output file:    [cyan]{out_file}[/cyan]")

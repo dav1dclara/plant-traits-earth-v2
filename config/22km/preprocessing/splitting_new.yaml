@@ -1,17 +1,17 @@
 data_dir: "/scratch3/plant-traits-v2/data/"
-validity_mask: "${data_dir}1km/predictor_validity_mask.tif"
+validity_mask: "${data_dir}22km/predictor_validity_mask.tif"
 
 targets:
-  resolution_km: 1
+  resolution_km: 22
 
 h3:
-  resolution: 2
+  resolution: 1
 
 splitting:
   train_frac: 0.70
   val_frac: 0.20
   test_frac: 0.10
-  stratum_resolution: 1  # H3 resolution for geographic strata (must be < h3.resolution)
+  stratum_resolution: 0  # H3 resolution for geographic strata (must be < h3.resolution)
 
 jsd:
   bands: [1]
@@ -22,7 +22,7 @@ jsd:
 cleanup:
   splits: [2]            # which splits to de-cluster (0=train, 1=val, 2=test)
   max_same_neighbors: 0  # max allowed same-split neighbors per cell
-  jsd_tolerance: 0.1    # max fractional JSD degradation allowed during cleanup
+  jsd_tolerance: 0.05    # max fractional JSD degradation allowed during cleanup
   n_iters: 10000         # max swap attempts
 
 debug:
