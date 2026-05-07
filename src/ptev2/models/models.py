@@ -5,9 +5,7 @@ This module re-exports the current implementations from `multitask`
 so old checkpoints can be loaded in the unified main pipeline.
 """
 
-from ptev2.models.multitask import (  # noqa: F401
-    GatedMMoEModel,
-    GatedMMoEModelV3,
-    MTLModel,
-    STLModel,
-)
+from ptev2.models.mmoe import GatedMMoEModel, GatedMMoEModelV3  # noqa: F401
+from ptev2.models.mtl import MTLModel  # noqa: F401
+from ptev2.models.pixel_mlp import PixelMLP  # noqa: F401
+from ptev2.models.stl import STLModel  # noqa: F401

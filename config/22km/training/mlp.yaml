@@ -1,0 +1,8 @@
+# @package _global_
+
+# Override to use the mlp model config and set a run name for 22km experiments
+defaults:
+  - /models: mlp
+  - _self_
+train:
+  run_name: mlp

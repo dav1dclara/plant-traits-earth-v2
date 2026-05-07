@@ -75,9 +75,10 @@ class PlantTraitDataset(Dataset):
         bundle: dict[str, dict[str, torch.Tensor]] = {}
         for dataset_name, layout in self.target_layouts.items():
             y_full = torch.as_tensor(self.store[f"targets/{dataset_name}"][store_idx])
-            y = y_full[layout["target_indices"]]
+            trait_positions = layout.get("trait_positions") or layout["target_indices"]
+            y = y_full[trait_positions]
             source_indices = layout.get("source_indices") or []
-            if source_indices:
+            if source_indices and max(source_indices) < y_full.shape[0]:
                 source_mask = y_full[source_indices]
             else:
                 source_mask = self._default_source_mask(y, dataset_name)

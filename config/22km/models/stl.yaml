@@ -1,9 +1,8 @@
 # Active STL model (single source of truth).
-_target_: ptev2.models.multitask.STLModel
+_target_: ptev2.models.stl.STLModel
 base_channels: 32
 norm: gn
 activation: prelu
 gn_groups: 8
 stride_blocks: [1, 1, 1, 1]
 dropout_p: 0.1
-pca_n_components: null

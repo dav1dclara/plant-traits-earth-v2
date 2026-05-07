@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /models: respatch
+  - /models: stl
   - _self_
 
 data:
@@ -32,7 +32,7 @@ data:
     bands: [mean]
 
 data_loaders:
-  batch_size: 128
+  batch_size: 32
   num_workers: 8
   train_fraction: 1.0
   val_fraction: 1.0
@@ -42,7 +42,7 @@ train:
   seed: 0
   run_name: null
   group: null
-  epochs: 15
+  epochs: 50
 
   optimizer:
     _target_: torch.optim.AdamW
@@ -54,12 +54,12 @@ train:
     error_type: smooth_l1
     huber_delta: 1.0
     splot_weight: 1.0
-    gbif_weight: 0.1
+    gbif_weight: 0.2
 
   scheduler:
     _target_: torch.optim.lr_scheduler.StepLR
-    step_size: 5
-    gamma: 0.7
+    step_size: 8
+    gamma: 0.8
 
   supervision:
     mode: dense
@@ -71,7 +71,7 @@ train:
 
   source_weights:
     splot: 1.0
-    gbif: 0.1
+    gbif: 0.2
 
   sampling:
     splot_balanced: true
@@ -89,7 +89,7 @@ train:
 
   early_stopping:
     enabled: true
-    patience: 5
+    patience: 8
     min_delta: 0.0
 
 mmoe:
@@ -106,4 +106,4 @@ checkpoint_dir: /scratch3/plant-traits-v2/checkpoints/
 wandb:
   enabled: true
   entity: plant-traits-v2
-  project: Project_PTV2
+  project: Project_PTV2_test_luca

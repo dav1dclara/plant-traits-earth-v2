@@ -1,7 +1,6 @@
 # Active MTL model (single source of truth).
-_target_: ptev2.models.multitask.MTLModel
-pca_n_components: null
-base_channels: 48
+_target_: ptev2.models.mtl.MTLModel
+base_channels: 32
 norm: gn
 activation: prelu
 gn_groups: 8

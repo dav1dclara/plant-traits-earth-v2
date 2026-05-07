@@ -58,6 +58,15 @@ Patch size, stride, data paths, and which predictors/targets to include are cont
 
 ## Model training
 
+The current 22 km model variants are split into dedicated modules:
+
+- `ptev2.models.pixel_mlp.PixelMLP` for the tiny 1x1-conv baseline.
+- `ptev2.models.stl.STLModel` for the single-task ResPatch-style baseline used by the `stl` config.
+- `ptev2.models.mtl.MTLModel` for the multi-task shared-encoder variant.
+- `ptev2.models.mmoe.GatedMMoEModelV3` for the dense MMoE variant.
+
+Legacy imports through `ptev2.models.models` and `ptev2.models.multitask` remain available for old checkpoints and configs.
+
 ### Supervision protocol
 
 - 22 km benchmark: patch-context / center-pixel supervision.

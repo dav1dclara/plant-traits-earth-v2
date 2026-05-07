@@ -1,7 +1,6 @@
 # Active MMoE model (single source of truth).
-_target_: ptev2.models.multitask.GatedMMoEModelV3
-pca_n_components: null
-base_channels: 48
+_target_: ptev2.models.mmoe.GatedMMoEModelV3
+base_channels: 32
 norm: gn
 activation: prelu
 gn_groups: 8
