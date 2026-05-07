@@ -174,6 +174,11 @@ def build_target_layout(
     cfg_bands = [str(v) for v in target_cfg.bands]
     if not cfg_bands:
         raise ValueError("data.targets.bands must not be empty.")
+    if cfg_bands != ["mean"]:
+        raise ValueError(
+            "22km training currently supports only data.targets.bands=[mean]. "
+            f"Got: {cfg_bands}"
+        )
     missing_bands = [b for b in cfg_bands if b not in band_to_idx]
     if missing_bands:
         raise ValueError(

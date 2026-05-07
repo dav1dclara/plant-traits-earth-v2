@@ -73,12 +73,6 @@ train:
     splot: 1.0
     gbif: 0.2
 
-  sampling:
-    splot_balanced: true
-    positive_dataset: splot
-    positive_fraction: 0.5
-    replacement: true
-
   eval_dataset: splot
 
   selection:
