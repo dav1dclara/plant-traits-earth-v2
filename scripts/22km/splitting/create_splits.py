@@ -1,5 +1,5 @@
 """
-Create a train/val/test/none split for all traits at 1km resolution.
+Create a train/val/test/none split for all traits at 22km resolution.
 
 - H3 cells with splot data: JSD-optimised assignment to train/val/test
 - H3 cells with gbif data only: randomly assigned to train/val (never test)
