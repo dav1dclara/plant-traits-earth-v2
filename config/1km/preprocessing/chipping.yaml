@@ -1,12 +1,13 @@
 paths:
-  predictors_dir: /scratch3/plant-traits-v2/data/1km/predictors_processed/
-  targets_dir: /scratch3/plant-traits-v2/data/1km/targets/
-  splits_file: /scratch3/plant-traits-v2/data/1km/splits/h3_splits_res2_1km.gpkg
-  zarr_dir: /scratch3/plant-traits-v2/data/1km/chips/
+  data_dir: "/scratch3/plant-traits-v2/data/"
+  predictors_dir: ${paths.data_dir}1km/predictors_processed/
+  targets_dir: ${paths.data_dir}1km/targets/
+  splits_file: ${paths.data_dir}1km/splits/h3_splits_res2_1km.gpkg
+  zarr_dir: ${paths.data_dir}1km/chips/
 
 settings:
-  patch_size: 256
-  stride: 256
+  patch_size: 128
+  stride: 64
   save_all: false
   overwrite: true
 
@@ -16,16 +17,16 @@ data:
       use: true
       bands: []
     modis:
-      use: false
+      use: true
       bands: []
     soilgrids:
-      use: false
+      use: true
       bands: []
     vodca:
       use: true
       bands: []
     worldclim:
-      use: false
+      use: true
       bands: []
 
   targets:
@@ -34,6 +35,6 @@ data:
       traits: []  # empty list -> use all traits
       bands: [1]  # list of trait indices to use (1-based indexing)
     gbif:
-      use: false
+      use: true
       traits: []  # empty list -> use all traits
       bands: [1]  # list of trait indices to use (1-based indexing)
