@@ -34,7 +34,7 @@ console = Console()
 
 @hydra.main(
     version_base=None,
-    config_path="../../../config/1km",
+    config_path="../../../config/1km/preprocessing",
     config_name="splitting",
 )
 def main(cfg: DictConfig) -> None:

@@ -178,7 +178,7 @@ def run_source(
 
 @hydra.main(
     version_base=None,
-    config_path="../../../config/1km",
+    config_path="../../../config/1km/preprocessing",
     config_name="preprocessing",
 )
 def main(cfg: DictConfig) -> None:

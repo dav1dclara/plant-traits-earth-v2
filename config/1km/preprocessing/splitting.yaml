@@ -17,12 +17,12 @@ jsd:
   bands: [1]
   n_restarts: 500
   n_bins: 50
-  random_seed: 42
+  random_seed: 67
 
 cleanup:
   splits: [2]            # which splits to de-cluster (0=train, 1=val, 2=test)
   max_same_neighbors: 0  # max allowed same-split neighbors per cell
-  jsd_tolerance: 0.1    # max fractional JSD degradation allowed during cleanup
+  jsd_tolerance: 0.05    # max fractional JSD degradation allowed during cleanup
   n_iters: 10000         # max swap attempts
 
 debug:
