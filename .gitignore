@@ -31,3 +31,6 @@ multirun/
 /MTL/
 analysis/
 report_*.md
+
+report/
+watch_refs/

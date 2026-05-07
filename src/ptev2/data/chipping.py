@@ -130,21 +130,28 @@ def _init_zarr_store(
 
     # Store band names once on the targets group (all targets share the same band order)
     first_tgt_name = next(iter(targets))
-    first_tgt_src = all_srcs[first_tgt_name][0]
-    all_band_names = list(first_tgt_src.descriptions)
+    first_tgt_srcs = all_srcs[first_tgt_name]
     if target_bands and first_tgt_name in target_bands:
-        tgt_group.attrs["band_names"] = [
-            all_band_names[b - 1] for b in target_bands[first_tgt_name]
-        ]
+        bands_sel = target_bands[first_tgt_name]
+        band_names = []
+        for src in first_tgt_srcs:
+            descs = list(src.descriptions)
+            band_names.extend(descs[b - 1] or f"band{b}" for b in bands_sel)
+        tgt_group.attrs["band_names"] = band_names
     else:
-        tgt_group.attrs["band_names"] = all_band_names
+        band_names = []
+        for src in first_tgt_srcs:
+            band_names.extend(
+                d or f"band{i + 1}" for i, d in enumerate(src.descriptions)
+            )
+        tgt_group.attrs["band_names"] = band_names
 
     for name, group, group_name in [
         (n, pred_group, "predictors") for n in predictors
     ] + [(n, tgt_group, "targets") for n in targets]:
         srcs = all_srcs[name]
         if name in targets and target_bands and name in target_bands:
-            n_bands = len(target_bands[name])
+            n_bands = len(srcs) * len(target_bands[name])
         else:
             n_bands = sum(src.count for src in srcs)
         arrays[name] = group.create_array(
@@ -372,7 +379,7 @@ def chip_rasters_to_zarr(
                 name: np.empty(
                     (
                         BUFFER_SIZE,
-                        len(target_bands[name])
+                        len(all_srcs[name]) * len(target_bands[name])
                         if (
                             name in target_names
                             and target_bands
@@ -411,20 +418,30 @@ def chip_rasters_to_zarr(
         strip_width = (n_cols - 1) * stride + patch_size
         # Use path strings (not open handles) so each worker thread can maintain its
         # own handle via _strip_reader_tls — concurrent prefetch reads are then safe.
+        # Attach per-file band selection so each worker reads only the needed bands.
+        # None means "read all bands" (predictors); a list means specific 1-indexed bands.
         all_paths_flat = [
-            (name, str(src.name)) for name, srcs in all_srcs.items() for src in srcs
+            (
+                name,
+                str(src.name),
+                list(target_bands[name])
+                if (name in target_names and target_bands and name in target_bands)
+                else None,
+            )
+            for name, srcs in all_srcs.items()
+            for src in srcs
         ]
         n_files = len(all_paths_flat)
 
         def _read_strip(args: tuple) -> np.ndarray:
-            path_str, window = args
+            path_str, window, bands = args
             if not hasattr(_strip_reader_tls, "files"):
                 _strip_reader_tls.files = {}
             if path_str not in _strip_reader_tls.files:
                 _strip_reader_tls.files[path_str] = rasterio.open(path_str)
             data = (
                 _strip_reader_tls.files[path_str]
-                .read(window=window, boundless=True, masked=True)
+                .read(indexes=bands, window=window, boundless=True, masked=True)
                 .astype(np.float32)
             )
             return data.filled(np.nan)
@@ -464,8 +481,8 @@ def chip_rasters_to_zarr(
                     y_px = row * stride
                     window = rasterio.windows.Window(0, y_px, strip_width, patch_size)
                     return [
-                        executor.submit(_read_strip, (path_str, window))
-                        for _, path_str in all_paths_flat
+                        executor.submit(_read_strip, (path_str, window, bands))
+                        for _, path_str, bands in all_paths_flat
                     ]
 
                 # Prefetch row 0 before entering the loop
@@ -494,12 +511,6 @@ def chip_rasters_to_zarr(
                             else np.concatenate(strips_flat[i : i + n], axis=0)
                         )
                         i += n
-
-                    # Apply target band selection (bands are 1-indexed)
-                    if target_bands:
-                        for name, bands in target_bands.items():
-                            if name in strips:
-                                strips[name] = strips[name][[b - 1 for b in bands]]
 
                     for col in range(n_cols):
                         x_px = col * stride

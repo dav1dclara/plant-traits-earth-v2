@@ -1,0 +1,40 @@
+paths:
+  data_dir: "/scratch3/plant-traits-v2/data/"
+  predictors_dir: ${paths.data_dir}1km/predictors_processed/
+  targets_dir: ${paths.data_dir}1km/targets/
+  splits_file: ${paths.data_dir}1km/splits/h3_splits_res2_1km.gpkg
+  zarr_dir: ${paths.data_dir}1km/chips/
+
+settings:
+  patch_size: 128
+  stride: 64
+  save_all: false
+  overwrite: true
+
+data:
+  predictors:
+    canopy_height:
+      use: true
+      bands: []
+    modis:
+      use: true
+      bands: []
+    soilgrids:
+      use: true
+      bands: []
+    vodca:
+      use: true
+      bands: []
+    worldclim:
+      use: true
+      bands: []
+
+  targets:
+    splot:
+      use: true
+      traits: []  # empty list -> use all traits
+      bands: [1]  # list of trait indices to use (1-based indexing)
+    gbif:
+      use: true
+      traits: []  # empty list -> use all traits
+      bands: [1]  # list of trait indices to use (1-based indexing)

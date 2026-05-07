@@ -1,17 +1,17 @@
 data_dir: "/scratch3/plant-traits-v2/data/"
-validity_mask: "${data_dir}22km/predictor_validity_mask.tif"
+validity_mask: "${data_dir}1km/predictor_validity_mask.tif"
 
 targets:
-  resolution_km: 22
+  resolution_km: 1
 
 h3:
-  resolution: 1
+  resolution: 2
 
 splitting:
   train_frac: 0.70
   val_frac: 0.20
   test_frac: 0.10
-  stratum_resolution: 0  # H3 resolution for geographic strata (must be < h3.resolution)
+  stratum_resolution: 1  # H3 resolution for geographic strata (must be < h3.resolution)
 
 jsd:
   bands: [1]

@@ -9,13 +9,13 @@ Create a train/val/test/none split for all traits at 22km resolution.
 
 from pathlib import Path
 
+import h3
 import hydra
 import numpy as np
 import rasterio
 from omegaconf import DictConfig
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from scipy.spatial.distance import cdist
 
 from ptev2.data.splitting import (
     build_cell_index,
@@ -24,8 +24,9 @@ from ptev2.data.splitting import (
     build_split_gdf,
     compute_total_jsd,
     count_valid_pixels_per_raster,
+    fix_clustering,
     generate_h3_grids,
-    optimize_splits,
+    spatially_stratified_split,
 )
 
 console = Console()
@@ -259,87 +260,52 @@ def main(cfg: DictConfig) -> None:
     console.print(
         f"Splot cells → train={n_train_splot}  val={n_val_splot}  test={n_test_splot}"
     )
-    console.print(f"Running {n_restarts} random restarts...")
-    best_labels, best_score = optimize_splits(
-        histograms, bin_edges, n_train_splot, n_val_splot, n_test_splot, n_restarts, rng
+    stratum_resolution = cfg.splitting.stratum_resolution
+    n_strata = len(h3.uncompact_cells(h3.get_res0_cells(), stratum_resolution))
+    console.print(f"Running {n_restarts} spatially stratified restarts...")
+    console.print(
+        f"Stratum H3 resolution: [cyan]{stratum_resolution}[/cyan] ({n_strata:,} cells globally)"
+    )
+
+    splot_cell_ids = [all_cells[c] for c in splot_indices]
+    best_labels, best_score = spatially_stratified_split(
+        histograms,
+        bin_edges,
+        splot_cell_ids,
+        n_train_splot,
+        n_val_splot,
+        n_test_splot,
+        n_restarts,
+        rng,
+        stratum_resolution=stratum_resolution,
     )
     console.print(f"Best mean JSD: {best_score:.6f}")
 
-    # Spatial refinement: swap test ↔ non-test cells to maximise geographic
-    # spread of test cells, accepting swaps only when JSD stays within tolerance.
-    jsd_tolerance = float(cfg.spatial.get("jsd_tolerance", 0.05))
-    n_spatial_iters = int(cfg.spatial.get("n_iters", 10_000))
+    # Post-processing: break up same-split clusters via greedy swaps
+    console.print("\n[bold]Fixing split clustering[/bold]")
+    cleanup_splits = list(cfg.cleanup.splits)
+    max_same_neighbors = cfg.cleanup.max_same_neighbors
+    jsd_tolerance = cfg.cleanup.jsd_tolerance
+    n_cleanup_iters = cfg.cleanup.n_iters
+    console.print(f"Splits to de-cluster:     [cyan]{cleanup_splits}[/cyan]")
+    console.print(f"Max same-split neighbors: [cyan]{max_same_neighbors}[/cyan]")
+    console.print(f"JSD tolerance:            [cyan]{jsd_tolerance:.0%}[/cyan]")
+    console.print(f"Max swap iterations:      [cyan]{n_cleanup_iters:,}[/cyan]")
 
-    console.print("\n[bold]Spatial refinement of test cell spread[/bold]")
-    console.print(f"JSD tolerance:  [cyan]{jsd_tolerance:.0%}[/cyan]")
-    console.print(f"Swap attempts:  [cyan]{n_spatial_iters:,}[/cyan]")
-
-    # Convert splot cell centroids to 3D unit-sphere coordinates so that
-    # Euclidean distance is a monotone proxy for great-circle distance.
-    lonlat = np.array(
-        [
-            [
-                polys_4326[splot_indices[i]].centroid.x,
-                polys_4326[splot_indices[i]].centroid.y,
-            ]
-            for i in range(n_splot)
-        ]
+    best_labels, n_accepted = fix_clustering(
+        best_labels,
+        splot_cell_ids,
+        histograms,
+        bin_edges,
+        max_same_neighbors=max_same_neighbors,
+        jsd_tolerance=jsd_tolerance,
+        rng=rng,
+        n_iters=n_cleanup_iters,
+        splits=cleanup_splits,
     )
-    lon_r, lat_r = np.radians(lonlat[:, 0]), np.radians(lonlat[:, 1])
-    xyz = np.column_stack(
-        [
-            np.cos(lat_r) * np.cos(lon_r),
-            np.cos(lat_r) * np.sin(lon_r),
-            np.sin(lat_r),
-        ]
-    )
-    # Precompute full pairwise distance matrix once (n_splot × n_splot)
-    pairwise_dist = cdist(xyz, xyz)
-
-    def _spread(labels: np.ndarray) -> float:
-        """Mean pairwise distance between test cells — higher = less clustered."""
-        idx = np.where(labels == 2)[0]
-        if len(idx) < 2:
-            return 0.0
-        d = pairwise_dist[np.ix_(idx, idx)]
-        return float(d.sum()) / (len(idx) * (len(idx) - 1))
-
-    jsd_budget = best_score * (1.0 + jsd_tolerance)
-    current_labels = best_labels.copy()
-    current_spread = _spread(current_labels)
-    test_idx = np.where(current_labels == 2)[0]
-    non_test_idx = np.where(current_labels != 2)[0]
-    n_accepted = 0
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Refining...", total=n_spatial_iters)
-        for _ in range(n_spatial_iters):
-            i = int(rng.choice(test_idx))
-            j = int(rng.choice(non_test_idx))
-            new_labels = current_labels.copy()
-            new_labels[i], new_labels[j] = new_labels[j], new_labels[i]
-            new_spread = _spread(new_labels)
-            if new_spread > current_spread:
-                if compute_total_jsd(histograms, new_labels, bin_edges) <= jsd_budget:
-                    current_labels = new_labels
-                    current_spread = new_spread
-                    test_idx = np.where(current_labels == 2)[0]
-                    non_test_idx = np.where(current_labels != 2)[0]
-                    n_accepted += 1
-            progress.advance(task)
-
-    best_labels = current_labels
     final_jsd = compute_total_jsd(histograms, best_labels, bin_edges)
     console.print(f"Swaps accepted: [cyan]{n_accepted:,}[/cyan]")
-    console.print(f"Final spread:   [cyan]{current_spread:.4f}[/cyan]")
-    console.print(
-        f"Final JSD:      [cyan]{final_jsd:.6f}[/cyan] (budget: {jsd_budget:.6f})"
-    )
+    console.print(f"Final JSD:      [cyan]{final_jsd:.6f}[/cyan]")
 
     split_map = {0: "train", 1: "val", 2: "test"}
     splot_splits = [split_map[int(l)] for l in best_labels]

@@ -80,8 +80,11 @@ def main(cfg: DictConfig) -> None:
     for name, target_cfg in used_targets.items():
         traits = list(target_cfg.traits) if target_cfg.traits else "all"
         bands = list(target_cfg.bands) if target_cfg.get("bands") else "all"
+        n_files = len(target_paths[name])
+        n_bands = len(list(target_cfg.bands)) if target_cfg.get("bands") else "all"
+        total = f"{n_files}×{n_bands}" if isinstance(n_bands, int) else f"{n_files}×all"
         console.print(
-            f"[green]+[/green] {name} (traits: {traits}, bands: {bands}, {len(target_paths[name])} file(s))"
+            f"[green]+[/green] {name} (traits: {traits}, bands per file: {bands}, {n_files} file(s) → {total} total channels)"
         )
     console.rule()
 

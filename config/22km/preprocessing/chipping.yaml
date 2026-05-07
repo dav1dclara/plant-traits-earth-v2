@@ -36,8 +36,8 @@ data:
     splot:
       use: true
       traits: []
-      bands: []
+      bands: [1]
     gbif:
       use: true
       traits: []
-      bands: []
+      bands: [1]

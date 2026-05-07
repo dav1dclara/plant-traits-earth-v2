@@ -1,6 +1,6 @@
 """
 Write predictor columns from eo_predict_imputed.parquet to GeoTIFF rasters.
-Band layout and output settings are defined in config/1km/preprocessing.yaml.
+Band layout and output settings are defined in config/1km/preprocessing/preprocessing.yaml.
 
 Usage:
     python write_predictors_to_tiff.py
@@ -31,7 +31,7 @@ def col_subfolder(name: str, cfg: DictConfig) -> str:
 
 @hydra.main(
     version_base=None,
-    config_path="../../../config/1km",
+    config_path="../../../config/1km/preprocessing",
     config_name="preprocessing",
 )
 def main(cfg: DictConfig) -> None:
