@@ -197,46 +197,62 @@ After training, evaluate each checkpoint separately:
 
 ```bash
 python scripts/22km/test.py \
-   checkpoint_path=/scratch3/plant-traits-v2/checkpoints/stl_s0.pth \
-   write_all_map=false
+   checkpoint_path=/scratch3/plant-traits-v2/checkpoints/stl_s0.pth
 ```
 
-If you want the merged prediction map, enable `write_all_map`:
+Test metrics will be logged to W&B under the `test` group by default. To organize multiple test runs together:
 
 ```bash
 python scripts/22km/test.py \
    checkpoint_path=/scratch3/plant-traits-v2/checkpoints/stl_s0.pth \
-   write_all_map=true \
-   prediction_tif_name=stl_s0.tif
+   wandb_group=stl-seeds-test
 ```
 
 ## Step 4: Run Inference and Evaluation
 
-The test entry point evaluates a checkpoint on the requested split and can optionally export a full prediction GeoTIFF.
+The test entry point evaluates a checkpoint on the requested split, logs the normalized macro metrics to Weights & Biases, and exports a full prediction GeoTIFF by default.
 
-### Metrics only
+The metric split is intentional:
+
+- W&B gets the normalized macro metrics so traits with different units stay comparable.
+- JSON gets both normalized and denormalized outputs.
+- Per-trait metrics are denormalized back into original trait units.
+- Residual standard deviations are included as a simple spread/uncertainty summary.
 
 ```bash
-python scripts/22km/test.py checkpoint_path=/scratch3/plant-traits-v2/checkpoints/stl.pth write_all_map=false
-```
-
-### Metrics plus full map export
-
-```bash
-python scripts/22km/test.py checkpoint_path=/scratch3/plant-traits-v2/checkpoints/stl.pth write_all_map=true prediction_tif_name=stl.tif
+python scripts/22km/test.py checkpoint_path=/scratch3/plant-traits-v2/checkpoints/stl.pth
 ```
 
 The test script reads the checkpoint's embedded training config to keep the preprocessing, supervision, and target layout consistent.
 
 Default output locations:
 
-- Metrics JSON: `test_outputs/`
-- Per-trait CSV diagnostics: `outputs/diagnostics/`
-- Full-map GeoTIFF: `predictions/`
+- **Metrics JSON** (compact + full): `test_outputs/<run_name>.test_metrics_*.json`
+- **Prediction GeoTIFF**: `predictions/<prediction_tif_name>` (created by default)
+- **Per-trait diagnostics CSV**: optional, only when `write_per_trait_csv=true`
 
-If `write_all_map` is enabled, the script writes the merged prediction raster to:
+The compact JSON stores the normalized macro metrics. The full JSON adds:
 
-- `predictions/<prediction_tif_name>`
+- normalized per-trait metrics and normalized residual standard deviations
+- denormalized per-trait metrics in original trait units
+- denormalized residual standard deviations
+
+Weights & Biases receives the normalized macro metrics under the `test/` namespace. You can customize the test run name and group:
+
+```bash
+python scripts/22km/test.py \
+   checkpoint_path=/scratch3/plant-traits-v2/checkpoints/stl.pth \
+   wandb_run_name=custom_test_run \
+   wandb_group=my_test_group
+```
+
+If you want the per-trait CSV diagnostics as well, enable it explicitly:
+
+```bash
+python scripts/22km/test.py \
+   checkpoint_path=/scratch3/plant-traits-v2/checkpoints/stl.pth \
+   write_per_trait_csv=true
+```
 
 ## Recommended Run Order
 

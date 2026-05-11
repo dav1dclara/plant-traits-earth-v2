@@ -1,5 +1,4 @@
 import csv
-import json
 from pathlib import Path
 
 import hydra
@@ -15,8 +14,10 @@ from rich.console import Console
 from rich.progress import track
 from torch.utils.data import DataLoader
 
+import wandb
 from ptev2.data.dataloader import PlantTraitDataset, get_dataloader
-from ptev2.metrics.evaluation import summarize_single_trait_metrics
+from ptev2.metrics.core import mae, pearson_r, r2_score, rmse
+from ptev2.transformations import denormalize_predictions, load_power_transformer_params
 from ptev2.utils import (
     apply_supervision_bundle,
     apply_supervision_tensor,
@@ -36,16 +37,159 @@ from ptev2.utils import (
 console = Console()
 
 
-def _to_python_scalars(obj):
-    if isinstance(obj, dict):
-        return {k: _to_python_scalars(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_to_python_scalars(v) for v in obj]
-    if isinstance(obj, np.floating):
-        return float(obj)
-    if isinstance(obj, np.integer):
-        return int(obj)
-    return obj
+def _resolve_power_transformer_params_csv(train_cfg: DictConfig) -> Path:
+    zarr_dir = Path(str(train_cfg.data.zarr_dir)).resolve()
+    for parent in zarr_dir.parents:
+        if parent.name == "data":
+            return parent / "power_transformer_params.csv"
+    raise ValueError(
+        f"Could not infer data root from zarr_dir '{zarr_dir}'. "
+        "Expected it to live under a 'data/' directory."
+    )
+
+
+def _summarize_denormalized_trait_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    valid_mask: np.ndarray,
+    traits: list[str],
+    n_bands: int,
+    params_df,
+    denorm_kwargs: dict | None = None,
+) -> tuple[dict[str, dict[str, float]], dict[str, list[np.ndarray]]]:
+    """
+    Compute denormalized metrics per trait.
+
+    Returns:
+        trait_metrics: dict of trait_name -> {n_valid, rmse, r2, pearson_r, mae, nrmse, residual_std, target_std, prediction_std}
+        trait_samples: dict of trait_name -> [yt_flat, yp_flat] for macro aggregation
+    """
+    trait_metrics: dict[str, dict[str, float]] = {}
+    trait_samples: dict[str, list[np.ndarray]] = {}
+    denorm_kwargs = denorm_kwargs or {}
+    denorm_kwargs_true = dict(denorm_kwargs)
+    denorm_kwargs_true["clip_z_abs"] = None
+    denorm_kwargs_true["max_abs_output"] = None
+    denorm_kwargs_true["clip_to_inverse_domain"] = False
+    denorm_kwargs_true["domain_margin_ratio"] = 0.0
+    denorm_kwargs_true["domain_margin_abs"] = 0.0
+
+    for trait_idx, trait_name in enumerate(traits):
+        start = trait_idx * n_bands
+        stop = start + n_bands
+
+        y_true_trait = denormalize_predictions(
+            y_true[:, start:stop, :, :], trait_name, params_df, **denorm_kwargs_true
+        )
+        y_pred_trait = denormalize_predictions(
+            y_pred[:, start:stop, :, :], trait_name, params_df, **denorm_kwargs
+        )
+        valid_trait = valid_mask[:, start:stop, :, :]
+        valid_trait = (
+            valid_trait & np.isfinite(y_true_trait) & np.isfinite(y_pred_trait)
+        )
+
+        if not bool(valid_trait.any()):
+            trait_metrics[trait_name] = {
+                "n_valid": 0,
+                "rmse": float("nan"),
+                "nrmse": float("nan"),
+                "r2": float("nan"),
+                "pearson_r": float("nan"),
+                "mae": float("nan"),
+                "residual_std": float("nan"),
+                "target_std": float("nan"),
+                "prediction_std": float("nan"),
+            }
+            trait_samples[trait_name] = [np.array([]), np.array([])]
+            continue
+
+        yt_trait = y_true_trait[valid_trait]
+        yp_trait = y_pred_trait[valid_trait]
+        residuals = yp_trait - yt_trait
+        value_range = float(np.nanmax(yt_trait) - np.nanmin(yt_trait))
+        trait_rmse = float(rmse(yt_trait, yp_trait))
+
+        trait_metrics[trait_name] = {
+            "n_valid": int(yt_trait.size),
+            "rmse": trait_rmse,
+            "nrmse": float(trait_rmse / value_range)
+            if np.isfinite(value_range) and value_range > 0.0
+            else float("nan"),
+            "r2": float(r2_score(yt_trait, yp_trait)),
+            "pearson_r": float(pearson_r(yt_trait, yp_trait)),
+            "mae": float(mae(yt_trait, yp_trait)),
+            "residual_std": float(np.std(residuals)),
+            "target_std": float(np.std(yt_trait)),
+            "prediction_std": float(np.std(yp_trait)),
+        }
+        trait_samples[trait_name] = [yt_trait, yp_trait]
+
+    return trait_metrics, trait_samples
+
+
+def _compute_macro_denormalized_metrics(
+    trait_metrics: dict[str, dict[str, float]],
+    trait_samples: dict[str, list[np.ndarray]],
+) -> dict[str, float]:
+    """
+    Compute macro metrics from denormalized per-trait data.
+
+    - pearson_r_macro: mean of trait Pearson r values
+    - r2_macro: mean of trait R² values
+    - rmse_macro: sqrt(mean(MSE)) over all samples
+    - mae_macro: mean(|residuals|) over all samples
+    - nrmse_macro: mean of trait NRMSE values
+    - residual_std_macro: mean of trait residual_std values
+    """
+    macro_metrics: dict[str, float] = {}
+
+    # Trait-wise averages
+    pearson_values = [
+        m["pearson_r"] for m in trait_metrics.values() if np.isfinite(m["pearson_r"])
+    ]
+    r2_values = [m["r2"] for m in trait_metrics.values() if np.isfinite(m["r2"])]
+    nrmse_values = [
+        m["nrmse"] for m in trait_metrics.values() if np.isfinite(m["nrmse"])
+    ]
+    residual_std_values = [
+        m["residual_std"]
+        for m in trait_metrics.values()
+        if np.isfinite(m["residual_std"])
+    ]
+
+    macro_metrics["pearson_r_macro"] = (
+        float(np.mean(pearson_values)) if pearson_values else float("nan")
+    )
+    macro_metrics["r2_macro"] = float(np.mean(r2_values)) if r2_values else float("nan")
+    macro_metrics["nrmse_macro"] = (
+        float(np.mean(nrmse_values)) if nrmse_values else float("nan")
+    )
+    macro_metrics["residual_std_macro"] = (
+        float(np.mean(residual_std_values)) if residual_std_values else float("nan")
+    )
+
+    # Aggregate over all samples
+    all_yt = []
+    all_yp = []
+    for trait_name in trait_metrics.keys():
+        yt, yp = trait_samples.get(trait_name, [np.array([]), np.array([])])
+        if yt.size > 0:
+            all_yt.append(yt)
+            all_yp.append(yp)
+
+    if all_yt:
+        all_yt_concat = np.concatenate(all_yt)
+        all_yp_concat = np.concatenate(all_yp)
+        residuals_all = all_yp_concat - all_yt_concat
+        mse_all = np.mean(residuals_all**2)
+        macro_metrics["rmse_macro"] = float(np.sqrt(mse_all))
+        macro_metrics["mae_macro"] = float(np.mean(np.abs(residuals_all)))
+    else:
+        macro_metrics["rmse_macro"] = float("nan")
+        macro_metrics["mae_macro"] = float("nan")
+
+    return macro_metrics
 
 
 def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
@@ -58,6 +202,43 @@ def _resolve_checkpoint_path(cfg: DictConfig) -> Path:
         return Path(str(cfg.checkpoint_dir)) / f"{str(run_name)}.pth"
 
     raise ValueError("Set checkpoint_path or run_name.")
+
+
+def _resolve_denormalization_kwargs(cfg: DictConfig) -> dict:
+    """
+    Resolve denormalization stability options from test config.
+
+    Returns kwargs forwarded to ptev2.transformations.denormalize_predictions.
+    """
+    clip_z_abs = OmegaConf.select(cfg, "denormalization.clip_z_abs")
+    max_abs_output = OmegaConf.select(cfg, "denormalization.max_abs_output")
+
+    kwargs = {
+        "clip_z_abs": float(clip_z_abs) if clip_z_abs is not None else None,
+        "clip_to_inverse_domain": bool(
+            OmegaConf.select(cfg, "denormalization.clip_to_inverse_domain")
+            if OmegaConf.select(cfg, "denormalization.clip_to_inverse_domain")
+            is not None
+            else True
+        ),
+        "domain_eps": float(
+            OmegaConf.select(cfg, "denormalization.domain_eps")
+            if OmegaConf.select(cfg, "denormalization.domain_eps") is not None
+            else 1e-6
+        ),
+        "domain_margin_ratio": float(
+            OmegaConf.select(cfg, "denormalization.domain_margin_ratio")
+            if OmegaConf.select(cfg, "denormalization.domain_margin_ratio") is not None
+            else 0.1
+        ),
+        "domain_margin_abs": float(
+            OmegaConf.select(cfg, "denormalization.domain_margin_abs")
+            if OmegaConf.select(cfg, "denormalization.domain_margin_abs") is not None
+            else 1e-3
+        ),
+        "max_abs_output": float(max_abs_output) if max_abs_output is not None else None,
+    }
+    return kwargs
 
 
 def _load_checkpoint_and_train_cfg(
@@ -253,6 +434,51 @@ def main(cfg: DictConfig) -> None:
     state, train_cfg = _load_checkpoint_and_train_cfg(checkpoint_path, device)
     seed_all(int(train_cfg.train.seed))
 
+    wandb_cfg = OmegaConf.select(train_cfg, "wandb")
+    wandb_enabled = bool(OmegaConf.select(train_cfg, "wandb.enabled") or False)
+    wandb_run = None
+    if wandb_enabled and wandb_cfg is not None:
+        # Extract training run name from checkpoint path (e.g., "stl_s0" from "stl_s0.pth")
+        training_run_name = checkpoint_path.stem
+        entity = str(OmegaConf.select(train_cfg, "wandb.entity") or "")
+        project = str(OmegaConf.select(train_cfg, "wandb.project") or "")
+
+        # Try to find and resume existing training run
+        run_id_to_resume = None
+        try:
+            from wandb.apis.public import Api
+
+            api = Api()
+            # Query for runs with the training run name
+            runs = api.runs(
+                f"{entity}/{project}", filters={"display_name": training_run_name}
+            )
+            if runs:
+                run_id_to_resume = runs[0].id
+                console.print(
+                    f"[cyan]Found existing training run:[/cyan] [yellow]{training_run_name}[/yellow] "
+                    f"(id={run_id_to_resume})"
+                )
+        except Exception as e:
+            console.print(f"[yellow]Could not query W&B API:[/yellow] {str(e)}")
+
+        if run_id_to_resume:
+            # Resume existing training run instead of creating new one
+            wandb_run = wandb.init(
+                entity=entity,
+                project=project,
+                id=run_id_to_resume,
+                resume="must",
+                job_type="test",
+            )
+            console.print(f"[cyan]Resumed W&B run for testing[/cyan]")
+        else:
+            console.print(
+                f"[yellow]No existing training run found for:[/yellow] {training_run_name}. "
+                f"[yellow]Test metrics will NOT be logged to W&B.[/yellow]"
+            )
+            wandb_enabled = False  # Disable W&B if no training run found
+
     zarr_dir_override = OmegaConf.select(cfg, "zarr_dir")
     if zarr_dir_override:
         if OmegaConf.select(train_cfg, "data") is None:
@@ -270,6 +496,43 @@ def main(cfg: DictConfig) -> None:
     zarr_dir = resolve_train_zarr_dir(train_cfg)
     train_store = zarr.open_group(str(zarr_dir / "train.zarr"), mode="r")
     target_layout = build_target_layout(train_cfg, train_store)
+    power_transform_csv = _resolve_power_transformer_params_csv(train_cfg)
+    power_transform_params = load_power_transformer_params(power_transform_csv)
+    denorm_kwargs = _resolve_denormalization_kwargs(cfg)
+    console.print(
+        "[cyan]Denormalization stability:[/cyan] "
+        f"clip_z_abs={denorm_kwargs['clip_z_abs']}, "
+        f"clip_to_inverse_domain={denorm_kwargs['clip_to_inverse_domain']}, "
+        f"domain_eps={denorm_kwargs['domain_eps']}, "
+        f"domain_margin_ratio={denorm_kwargs['domain_margin_ratio']}, "
+        f"domain_margin_abs={denorm_kwargs['domain_margin_abs']}, "
+        f"max_abs_output={denorm_kwargs['max_abs_output']}"
+    )
+
+    # Identify traits with and without power-transform parameters
+    original_traits = target_layout["traits"]
+    available_traits = [t for t in original_traits if t in power_transform_params.index]
+    missing_traits = [
+        t for t in original_traits if t not in power_transform_params.index
+    ]
+
+    if missing_traits:
+        console.print(
+            f"[yellow]Warning:[/yellow] Traits without power-transform parameters will be skipped during evaluation: "
+            f"{missing_traits}"
+        )
+
+    if not available_traits:
+        raise ValueError(
+            f"No traits with power-transform parameters found. All {len(original_traits)} traits "
+            f"are missing parameters. Checked {power_transform_csv}."
+        )
+
+    # Filter power_transform_params to only available traits for later use
+    power_transform_params_available = power_transform_params.loc[available_traits]
+
+    # Keep original_traits for model loading (checkpoint was trained with all traits)
+    # We'll filter predictions to available_traits during evaluation
 
     eval_dataset_ckpt = str(target_layout["eval_dataset"])
     eval_dataset_override = OmegaConf.select(cfg, "eval_dataset")
@@ -302,9 +565,15 @@ def main(cfg: DictConfig) -> None:
     total_pred_bands = sum(
         train_store[f"predictors/{name}"].shape[1] for name in predictors
     )
-    traits = list(target_layout["traits"])
+    traits = list(target_layout["traits"])  # All 37 traits (for model architecture)
     bands = list(target_layout["bands"])
     out_channels = len(traits) * len(bands)
+
+    # Compute indices of available traits for later filtering
+    available_trait_indices = [
+        i for i, trait in enumerate(traits) if trait in available_traits
+    ]
+    n_available_traits = len(available_trait_indices)
 
     model = instantiate(
         model_cfg,
@@ -425,104 +694,91 @@ def main(cfg: DictConfig) -> None:
     y_pred = np.concatenate(all_y_pred, axis=0)
     valid_mask = np.concatenate(all_valid, axis=0)
 
-    metric_summary = summarize_single_trait_metrics(
+    # Filter to only available traits (exclude traits without power-transform params)
+    # Predictions have shape (batch, traits*bands, h, w), need to filter trait dimension
+    y_true_filtered_list = []
+    y_pred_filtered_list = []
+    valid_mask_filtered_list = []
+    for trait_idx in available_trait_indices:
+        start = trait_idx * len(bands)
+        stop = start + len(bands)
+        y_true_filtered_list.append(y_true[:, start:stop, :, :])
+        y_pred_filtered_list.append(y_pred[:, start:stop, :, :])
+        valid_mask_filtered_list.append(valid_mask[:, start:stop, :, :])
+
+    y_true = np.concatenate(y_true_filtered_list, axis=1)
+    y_pred = np.concatenate(y_pred_filtered_list, axis=1)
+    valid_mask = np.concatenate(valid_mask_filtered_list, axis=1)
+
+    # Update traits list for metrics calculation to only available traits
+    traits_for_metrics = available_traits
+
+    # Filter source_counts_per_trait to only available traits
+    source_counts_per_trait = {
+        trait: source_counts_per_trait[trait]
+        for trait in available_traits
+        if trait in source_counts_per_trait
+    }
+
+    denormalized_trait_metrics, trait_samples = _summarize_denormalized_trait_metrics(
         y_true=y_true,
         y_pred=y_pred,
-        source_mask=None,
         valid_mask=valid_mask,
-        trait_names=traits,
+        traits=traits_for_metrics,
         n_bands=len(bands),
+        params_df=power_transform_params_available,
+        denorm_kwargs=denorm_kwargs,
+    )
+    denormalized_macro_metrics = _compute_macro_denormalized_metrics(
+        denormalized_trait_metrics, trait_samples
     )
 
     output_dir = Path(str(cfg.output_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = checkpoint_path.stem
 
-    if supervision_mode == "center_pixel":
-        count_semantics = "Counts refer to supervised center-cell observations."
-    elif supervision_mode == "center_crop":
-        count_semantics = "Counts refer to supervised center-crop pixel observations."
-    else:
-        count_semantics = "Counts refer to dense supervised pixel observations; overlapping chips can duplicate targets."
+    # Write denormalized metrics to CSV (sorted by trait_id)
+    csv_path = output_dir / f"{stem}.test_metrics.csv"
+    sorted_traits = sorted(
+        traits_for_metrics, key=lambda x: int(x) if x.isdigit() else float("inf")
+    )
 
-    compact_metrics = {
-        "checkpoint": str(checkpoint_path),
-        "split": test_split,
-        "mode": str(target_layout["mode"]),
-        "target_mode": str(target_layout["mode"]),
-        "eval_dataset": eval_dataset,
-        "supervision_mode": supervision_mode,
-        "center_crop_size": int(center_crop_size),
-        "predictor_validity_mode": predictor_validity_mode,
-        "predictor_min_finite_ratio": float(predictor_min_finite_ratio),
-        "count_semantics": count_semantics,
-        "n_valid": int(metric_summary["n_valid"]),
-        "n_valid_splot": int(n_valid_splot),
-        "n_valid_gbif": int(n_valid_gbif),
-        "skipped_batches": int(skipped_batches),
-        "rmse": float(metric_summary["rmse"]),
-        "nrmse": float(metric_summary["nrmse"]),
-        "r2": float(metric_summary["r2"]),
-        "pearson_r": float(metric_summary["pearson_r"]),
-        "mae": float(metric_summary["mae"]),
-        "macro_rmse": float(metric_summary["macro_rmse"]),
-        "macro_nrmse": float(metric_summary["macro_nrmse"]),
-        "macro_r2": float(metric_summary["macro_r2"]),
-        "macro_pearson_r": float(metric_summary["macro_pearson_r"]),
-        "macro_mae": float(metric_summary["macro_mae"]),
-    }
-
-    compact_path = output_dir / f"{stem}.test_metrics_compact.json"
-    compact_path.write_text(json.dumps(compact_metrics, indent=2), encoding="utf-8")
-    full_metrics = {
-        **compact_metrics,
-        "trait_metrics": _to_python_scalars(metric_summary["trait_metrics"]),
-        "trait_source_counts": _to_python_scalars(source_counts_per_trait),
-    }
-    full_path = output_dir / f"{stem}.test_metrics_full.json"
-    full_path.write_text(json.dumps(full_metrics, indent=2), encoding="utf-8")
-
-    diagnostics_dir = Path(str(OmegaConf.select(cfg, "diagnostics_dir") or output_dir))
-    diagnostics_dir.mkdir(parents=True, exist_ok=True)
-    per_trait_csv = diagnostics_dir / "per_trait_test_metrics.csv"
-    if not per_trait_csv.exists():
-        with per_trait_csv.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "run_name",
-                    "split",
-                    "mode",
-                    "eval_dataset",
-                    "trait",
-                    "n_valid",
-                    "n_valid_splot",
-                    "n_valid_gbif",
-                    "rmse",
-                    "r2",
-                    "pearson_r",
-                    "mae",
-                ]
-            )
-    with per_trait_csv.open("a", newline="", encoding="utf-8") as f:
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        for trait_name, metrics in metric_summary["trait_metrics"].items():
+        writer.writerow(
+            [
+                "trait_id",
+                "n_valid",
+                "rmse",
+                "r2",
+                "pearson_r",
+                "mae",
+                "nrmse",
+                "residual_std",
+                "target_std",
+                "prediction_std",
+            ]
+        )
+        for trait_name in sorted_traits:
+            metrics = denormalized_trait_metrics[trait_name]
             writer.writerow(
                 [
-                    stem,
-                    test_split,
-                    str(target_layout["mode"]),
-                    eval_dataset,
                     trait_name,
                     metrics["n_valid"],
-                    source_counts_per_trait[trait_name]["n_valid_splot"],
-                    source_counts_per_trait[trait_name]["n_valid_gbif"],
                     metrics["rmse"],
                     metrics["r2"],
                     metrics["pearson_r"],
                     metrics["mae"],
+                    metrics["nrmse"],
+                    metrics["residual_std"],
+                    metrics["target_std"],
+                    metrics["prediction_std"],
                 ]
             )
+
+    console.print(
+        f"[green]Denormalized metrics CSV written:[/green] [cyan]{csv_path}[/cyan]"
+    )
 
     out_tif_path = None
     write_all_map_cfg = OmegaConf.select(cfg, "write_all_map")
@@ -570,6 +826,22 @@ def main(cfg: DictConfig) -> None:
                 all_preds.append(y_pred_map.detach().cpu().numpy())
 
         preds_all = np.concatenate(all_preds, axis=0)
+
+        # Denormalize predictions
+        preds_denorm = np.full_like(preds_all, float("nan"), dtype=np.float32)
+        for trait_idx, trait_name in enumerate(traits):
+            if trait_name not in available_traits:
+                # Skip traits without transformation params
+                continue
+            start = trait_idx * len(bands)
+            stop = start + len(bands)
+            preds_denorm[:, start:stop, :, :] = denormalize_predictions(
+                preds_all[:, start:stop, :, :],
+                trait_name,
+                power_transform_params,
+                **denorm_kwargs,
+            )
+
         prediction_out_dir = Path(
             str(OmegaConf.select(cfg, "prediction_out_dir") or output_dir)
         )
@@ -578,27 +850,71 @@ def main(cfg: DictConfig) -> None:
         )
         out_tif_path = prediction_out_dir / prediction_filename
         band_names = [f"{trait}_{band}" for trait in traits for band in bands]
-        _write_all_prediction_tif(preds_all, all_store, out_tif_path, band_names)
+        _write_all_prediction_tif(preds_denorm, all_store, out_tif_path, band_names)
+        console.print(
+            f"[green]Denormalized predictions TIF written:[/green] [cyan]{out_tif_path}[/cyan]"
+        )
+
+    if wandb_run is not None:
+        wandb_summary_dict = {
+            "test/denorm_macro_rmse": denormalized_macro_metrics["rmse_macro"],
+            "test/denorm_macro_nrmse": denormalized_macro_metrics["nrmse_macro"],
+            "test/denorm_macro_r2": denormalized_macro_metrics["r2_macro"],
+            "test/denorm_macro_pearson_r": denormalized_macro_metrics[
+                "pearson_r_macro"
+            ],
+            "test/denorm_macro_mae": denormalized_macro_metrics["mae_macro"],
+            "test/denorm_macro_residual_std": denormalized_macro_metrics[
+                "residual_std_macro"
+            ],
+            "test/denorm_n_valid": int(
+                sum(m["n_valid"] for m in denormalized_trait_metrics.values())
+            ),
+            "test/denorm_n_valid_splot": int(n_valid_splot),
+            "test/denorm_n_valid_gbif": int(n_valid_gbif),
+        }
+        # Log with commit=True to create new "test" section in W&B
+        wandb.log(wandb_summary_dict, commit=True)
+        wandb.summary.update(wandb_summary_dict)
+        console.print(
+            f"[green]W&B Summary + Log updated:[/green] {list(wandb_summary_dict.keys())}"
+        )
 
     console.print(f"checkpoint: [cyan]{checkpoint_path}[/cyan]")
     console.print(f"split:      [cyan]{test_split}[/cyan]")
     console.print(f"mode:       [cyan]{target_layout['mode']}[/cyan]")
     console.print(f"eval_data:  [cyan]{eval_dataset}[/cyan]")
-    console.print(f"n_valid:    [cyan]{compact_metrics['n_valid']}[/cyan]")
-    console.print(f"n_valid_splot: [cyan]{compact_metrics['n_valid_splot']}[/cyan]")
-    console.print(f"n_valid_gbif:  [cyan]{compact_metrics['n_valid_gbif']}[/cyan]")
-    console.print(f"macro_rmse: [cyan]{compact_metrics['macro_rmse']:.6f}[/cyan]")
-    console.print(f"macro_nrmse: [cyan]{compact_metrics['macro_nrmse']:.6f}[/cyan]")
-    console.print(f"macro_r2:   [cyan]{compact_metrics['macro_r2']:.6f}[/cyan]")
-    console.print(f"macro_r:    [cyan]{compact_metrics['macro_pearson_r']:.6f}[/cyan]")
-    console.print(f"macro_mae:  [cyan]{compact_metrics['macro_mae']:.6f}[/cyan]")
-    console.print(f"metrics:    [cyan]{compact_path}[/cyan]")
-    console.print(f"metrics full:[cyan]{full_path}[/cyan]")
-    console.print(f"per-trait:  [cyan]{per_trait_csv}[/cyan]")
+    n_valid_total = int(sum(m["n_valid"] for m in denormalized_trait_metrics.values()))
+    console.print(f"n_valid:    [cyan]{n_valid_total}[/cyan]")
+    console.print(f"n_valid_splot: [cyan]{n_valid_splot}[/cyan]")
+    console.print(f"n_valid_gbif:  [cyan]{n_valid_gbif}[/cyan]")
+    console.print(f"\n[bold]Denormalized Macro Metrics:[/bold]")
+    console.print(
+        f"macro_rmse: [cyan]{denormalized_macro_metrics['rmse_macro']:.6f}[/cyan]"
+    )
+    console.print(
+        f"macro_nrmse: [cyan]{denormalized_macro_metrics['nrmse_macro']:.6f}[/cyan]"
+    )
+    console.print(
+        f"macro_r2:   [cyan]{denormalized_macro_metrics['r2_macro']:.6f}[/cyan]"
+    )
+    console.print(
+        f"macro_r:    [cyan]{denormalized_macro_metrics['pearson_r_macro']:.6f}[/cyan]"
+    )
+    console.print(
+        f"macro_mae:  [cyan]{denormalized_macro_metrics['mae_macro']:.6f}[/cyan]"
+    )
+    console.print(
+        f"macro_residual_std: [cyan]{denormalized_macro_metrics['residual_std_macro']:.6f}[/cyan]"
+    )
+    console.print(f"metrics_csv:[cyan]{csv_path}[/cyan]")
     if out_tif_path is not None:
         console.print(f"all-map tif:[cyan]{out_tif_path}[/cyan]")
     else:
         console.print("all-map tif:[yellow]skipped (write_all_map=false)[/yellow]")
+
+    if wandb_run is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":

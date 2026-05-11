@@ -8,4 +8,23 @@ prediction_tif_name: null
 test_split: test
 eval_dataset: splot
 diagnostics_dir: /scratch3/plant-traits-v2/outputs/diagnostics
-write_all_map: false
+write_all_map: true
+write_per_trait_csv: false
+wandb_run_name: null
+wandb_group: test
+
+# Denormalization stability controls (z-space -> raw units)
+denormalization:
+  # Clip model outputs in normalized z-space before inverse transform.
+  # 3.0 keeps almost all in-distribution predictions while suppressing
+  # rare outliers that can explode in raw space for negative lambdas.
+  clip_z_abs: 3.0
+  # Keep Yeo-Johnson intermediate values inside the mathematical inverse domain.
+  clip_to_inverse_domain: true
+  # Small positive margin for inverse-domain clipping.
+  domain_eps: 1.0e-6
+  # Additional safety distance from inverse boundary for predictions.
+  domain_margin_ratio: 0.1
+  domain_margin_abs: 1.0e-3
+  # Optional final cap in raw units; null disables.
+  max_abs_output: null
