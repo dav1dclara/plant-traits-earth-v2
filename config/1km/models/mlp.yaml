@@ -1,0 +1,7 @@
+_target_: ptev2.models.pixel_mlp.PixelMLP
+hidden_dim: 64
+depth: 2
+norm: gn
+activation: prelu
+gn_groups: 8
+dropout_p: 0.1

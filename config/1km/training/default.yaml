@@ -1,0 +1,92 @@
+# @package _global_
+defaults:
+  - /models: mlp
+  - _self_
+
+data:
+  root_dir: /Users/david/workdir/plant-traits-earth-v2/data/  # TODO: revert to /scratch3/plant-traits-v2/data/
+  resolution_km: 1
+  chips_dirname: chips
+  patch_size: 128
+  stride: 128
+
+  predictors:
+    canopy_height:
+      use: true
+
+  targets:
+    mode: source_weighted
+    primary_dataset: splot
+    auxiliary_dataset: gbif
+    eval_dataset: splot
+    traits: ["1080"]
+    bands: [mean]
+
+data_loaders:
+  batch_size: 4
+  num_workers: 0  # TODO: set to 8 on cluster
+  train_fraction: 1.0
+  val_fraction: 1.0
+  subset_seed: 0
+
+train:
+  seed: 0
+  run_name: null
+  group: null
+  epochs: 50
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 1e-4
+    weight_decay: 1e-5
+
+  loss:
+    _target_: ptev2.loss.WeightedMaskedDenseLoss
+    error_type: smooth_l1
+    huber_delta: 1.0
+    splot_weight: 1.0
+    gbif_weight: 0.2
+
+  scheduler:
+    _target_: torch.optim.lr_scheduler.StepLR
+    step_size: 8
+    gamma: 0.8
+
+  supervision:
+    mode: dense
+    center_crop_size: 1
+
+  predictor_validity:
+    mode: min_fraction
+    min_finite_ratio: 0.2
+
+  source_weights:
+    splot: 1.0
+    gbif: 0.2
+
+  selection:
+    metric: val_splot_macro_pearson
+    mode: max
+
+  gradient_clip_norm: 1.0
+
+  early_stopping:
+    enabled: true
+    patience: 8
+    min_delta: 0.0
+
+mmoe:
+  load_balance_weight: 0.0
+  group_consistency_weight: 0.0
+  trait_groups:
+    - [237, 4, 13, 46, 47, 50, 146, 169, 297, 3106, 3107]
+    - [55, 144, 145, 163, 281, 351, 3112, 3113]
+    - [3114, 14, 15, 78, 95, 223, 614, 1080, 3117, 3120]
+    - [26, 6, 21, 27, 138, 224, 282, 289]
+
+checkpoint_dir: /Users/david/workdir/plant-traits-earth-v2/data/checkpoints/1km/  # TODO: revert to /scratch3/plant-traits-v2/checkpoints/1km/
+
+wandb:
+  enabled: true
+  entity: plant-traits-v2
+  project: 1km
