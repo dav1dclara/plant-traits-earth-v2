@@ -2,14 +2,14 @@ paths:
   data_dir: "/scratch3/plant-traits-v2/data/"
   predictors_dir: ${paths.data_dir}1km/predictors_processed/
   targets_dir: ${paths.data_dir}1km/targets/
-  splits_file: ${paths.data_dir}1km/splits/h3_splits_res2_1km.gpkg
+  splits_file: ${paths.data_dir}1km/splits/1km_splits_h3_res2.gpkg
   zarr_dir: ${paths.data_dir}1km/chips/
 
 settings:
   patch_size: 128
   stride: 64
-  save_all: false
-  overwrite: true
+  save_all: true
+  overwrite: false
 
 data:
   predictors:

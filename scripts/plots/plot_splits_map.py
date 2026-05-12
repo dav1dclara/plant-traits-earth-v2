@@ -44,7 +44,7 @@ def main() -> None:
     res = args.resolution
     h3_resolution = H3_RESOLUTION_BY_RES[res]
     splits_file = (
-        DATA_DIR / f"{res}km" / "splits" / f"h3_splits_res{h3_resolution}_{res}km.gpkg"
+        DATA_DIR / f"{res}km" / "splits" / f"{res}km_splits_h3_res{h3_resolution}.gpkg"
     )
     out_path = OUT_DIR / f"{res}km" / "splits" / "split_map.png"
 

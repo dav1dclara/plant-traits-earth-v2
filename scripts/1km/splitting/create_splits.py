@@ -82,7 +82,7 @@ def main(cfg: DictConfig) -> None:
     console.print()
 
     out_dir = data_dir / f"{resolution_km}km" / "splits"
-    out_file = out_dir / f"h3_splits_res{h3_resolution}_{resolution_km}km.gpkg"
+    out_file = out_dir / f"{resolution_km}km_splits_h3_res{h3_resolution}.gpkg"
     out_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"Output file:    [cyan]{out_file}[/cyan]")
 

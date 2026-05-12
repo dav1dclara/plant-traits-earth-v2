@@ -59,7 +59,7 @@ def main() -> None:
     res_dir = DATA_DIR / f"{res}km"
     splot_dir = res_dir / "targets" / "splot"
     gbif_dir = res_dir / "targets" / "gbif"
-    splits_file = res_dir / "splits" / f"h3_splits_res{h3_resolution}_{res}km.gpkg"
+    splits_file = res_dir / "splits" / f"{res}km_splits_h3_res{h3_resolution}.gpkg"
 
     console.rule(f"[bold]SPLIT DISTRIBUTIONS — {res}km[/bold]")
     console.print(f"Splits file:  [cyan]{splits_file}[/cyan]")
