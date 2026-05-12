@@ -8,7 +8,7 @@ paths:
 settings:
   patch_size: 128
   stride: 64
-  save_all: true
+  save_all: false
   overwrite: false
 
 data:
