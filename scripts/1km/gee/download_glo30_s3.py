@@ -20,6 +20,7 @@ import argparse
 import math
 import re
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -180,8 +181,11 @@ def build(
             REF_TRANSFORM.e,
             REF_TRANSFORM.f + (r0 + row_offset) * REF_TRANSFORM.e,
         )
-        src = rasterio.open(tile_url(lat, lon))
-        if src.crs is None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            src = rasterio.open(tile_url(lat, lon))
+            bad = src.crs is None or src.transform == Affine.identity()
+        if bad:
             src.close()
             return None
         dst_data = np.full((h, w), np.nan, dtype=np.float32)
@@ -206,41 +210,62 @@ def build(
         if w > 0 and h > 0
     ]
 
-    with (
-        progress,
-        rasterio.open(
-            output,
-            "w",
-            driver="GTiff",
-            height=out_height,
-            width=out_width,
-            count=1,
-            dtype="float32",
-            crs=REF_CRS,
-            transform=out_transform,
-            compress="deflate",
-            tiled=True,
-            nodata=np.nan,
-        ) as dst,
-    ):
-        task = progress.add_task("Processing tiles", total=len(pending))
-        with ThreadPoolExecutor(max_workers=16) as pool:
-            futures = {
-                pool.submit(process_tile, lat, lon, c0, r0, w, h): (lat, lon)
-                for lat, lon, c0, r0, w, h in pending
-            }
-            for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    c0, r0, w, h, dst_data = result
-                    with write_lock:
-                        dst.write(
-                            dst_data[np.newaxis],
-                            window=rasterio.windows.Window(c0, r0, w, h),
-                        )
-                progress.advance(task)
+    chunk_size = 500
+    chunks = [pending[i : i + chunk_size] for i in range(0, len(pending), chunk_size)]
+    stem = output.stem
+    for part_idx, chunk in enumerate(chunks):
+        if len(chunks) > 1:
+            part_output = output.with_name(
+                f"{stem}_part{part_idx + 1:03d}{output.suffix}"
+            )
+        else:
+            part_output = output
 
-    print(f"Written: {output}")
+        if part_output.exists():
+            print(
+                f"Skipping part {part_idx + 1}/{len(chunks)} (already exists): {part_output}"
+            )
+            continue
+
+        tmp_output = part_output.with_suffix(".tmp.tif")
+        with (
+            progress,
+            rasterio.open(
+                tmp_output,
+                "w",
+                driver="GTiff",
+                height=out_height,
+                width=out_width,
+                count=1,
+                dtype="float32",
+                crs=REF_CRS,
+                transform=out_transform,
+                compress="deflate",
+                tiled=True,
+                nodata=np.nan,
+            ) as dst,
+        ):
+            task = progress.add_task(
+                f"Part {part_idx + 1}/{len(chunks)}", total=len(chunk)
+            )
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                futures = {
+                    pool.submit(process_tile, lat, lon, c0, r0, w, h): (lat, lon)
+                    for lat, lon, c0, r0, w, h in chunk
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result is not None:
+                        c0, r0, w, h, dst_data = result
+                        with write_lock:
+                            dst.write(
+                                dst_data[np.newaxis],
+                                window=rasterio.windows.Window(c0, r0, w, h),
+                            )
+                    progress.advance(task)
+
+        tmp_output.rename(part_output)
+        print(f"Written: {part_output}")
 
 
 def main():
