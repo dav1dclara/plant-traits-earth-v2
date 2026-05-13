@@ -144,7 +144,9 @@ def main(cfg: DictConfig) -> None:
         raise FileNotFoundError(f"Zarr directory does not exist: {zarr_dir}")
     console.print(f"Zarr directory: [cyan]{zarr_dir}[/cyan]")
 
-    train_store = zarr.open_group(str(zarr_dir / "train.zarr"), mode="r")
+    from ptev2.data.dataloader import _open_zarr, _resolve_zarr_path
+
+    train_store = _open_zarr(_resolve_zarr_path(zarr_dir, "train"))
 
     predictors = [
         name
