@@ -127,16 +127,17 @@ def build(
     out_height: int,
     col_offset: int,
     row_offset: int,
+    valid: set | None = None,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    print("Fetching tile index from S3...")
-    valid = available_tiles()
+    if valid is None:
+        print("Fetching tile index from S3...")
+        valid = available_tiles()
 
     lats = range(math.floor(lat_min), math.ceil(lat_max))
     lons = range(math.floor(lon_min), math.ceil(lon_max))
     tiles = [(lat, lon) for lat in lats for lon in lons if (lat, lon) in valid]
-    total = len(tiles)
 
     progress = Progress(
         TextColumn("[bold blue]{task.description}"),
@@ -210,89 +211,137 @@ def build(
         if w > 0 and h > 0
     ]
 
-    chunk_size = 500
-    chunks = [pending[i : i + chunk_size] for i in range(0, len(pending), chunk_size)]
-    stem = output.stem
-    for part_idx, chunk in enumerate(chunks):
-        if len(chunks) > 1:
-            part_output = output.with_name(
-                f"{stem}_part{part_idx + 1:03d}{output.suffix}"
-            )
-        else:
-            part_output = output
+    if output.exists():
+        print(f"Skipping (already exists): {output}")
+        return
 
-        if part_output.exists():
-            print(
-                f"Skipping part {part_idx + 1}/{len(chunks)} (already exists): {part_output}"
-            )
-            continue
+    if not pending:
+        print(f"No tiles for this region, skipping.")
+        return
 
-        tmp_output = part_output.with_suffix(".tmp.tif")
-        with (
-            progress,
-            rasterio.open(
-                tmp_output,
-                "w",
-                driver="GTiff",
-                height=out_height,
-                width=out_width,
-                count=1,
-                dtype="float32",
-                crs=REF_CRS,
-                transform=out_transform,
-                compress="deflate",
-                tiled=True,
-                nodata=np.nan,
-            ) as dst,
-        ):
-            task = progress.add_task(
-                f"Part {part_idx + 1}/{len(chunks)}", total=len(chunk)
-            )
-            with ThreadPoolExecutor(max_workers=16) as pool:
-                futures = {
-                    pool.submit(process_tile, lat, lon, c0, r0, w, h): (lat, lon)
-                    for lat, lon, c0, r0, w, h in chunk
-                }
-                for future in as_completed(futures):
-                    result = future.result()
-                    if result is not None:
-                        c0, r0, w, h, dst_data = result
-                        with write_lock:
-                            dst.write(
-                                dst_data[np.newaxis],
-                                window=rasterio.windows.Window(c0, r0, w, h),
-                            )
-                    progress.advance(task)
+    tmp_output = output.with_suffix(".tmp.tif")
+    with (
+        progress,
+        rasterio.open(
+            tmp_output,
+            "w",
+            driver="GTiff",
+            height=out_height,
+            width=out_width,
+            count=1,
+            dtype="float32",
+            crs=REF_CRS,
+            transform=out_transform,
+            compress="deflate",
+            tiled=True,
+            nodata=np.nan,
+        ) as dst,
+    ):
+        task = progress.add_task(f"{output.stem}", total=len(pending))
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            futures = {
+                pool.submit(process_tile, lat, lon, c0, r0, w, h): (lat, lon)
+                for lat, lon, c0, r0, w, h in pending
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    c0, r0, w, h, dst_data = result
+                    with write_lock:
+                        dst.write(
+                            dst_data[np.newaxis],
+                            window=rasterio.windows.Window(c0, r0, w, h),
+                        )
+                progress.advance(task)
 
-        tmp_output.rename(part_output)
-        print(f"Written: {part_output}")
+    tmp_output.rename(output)
+    print(f"Written: {output}")
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--region", choices=["switzerland", "europe", "global"])
     parser.add_argument(
-        "--region", choices=["switzerland", "europe", "global"], default="switzerland"
+        "--bbox",
+        type=float,
+        nargs=4,
+        metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--grid-size",
+        type=int,
+        default=30,
+        help="Grid cell size in degrees for global mode (default: 30)",
+    )
     args = parser.parse_args()
 
-    if args.region == "global":
-        bbox = (-180, -90, 180, 90)
-        out_transform, out_width, out_height = REF_TRANSFORM, REF_WIDTH, REF_HEIGHT
-        col_offset, row_offset = 0, 0
-        output = args.output or Path(
-            "data/1km/predictors_new/glo30/copernicus_glo30.tif"
+    if args.bbox:
+        lon_min, lat_min, lon_max, lat_max = args.bbox
+        out_transform, out_width, out_height, col_offset, row_offset = (
+            bbox_to_ref_subgrid(lon_min, lat_min, lon_max, lat_max)
         )
+        ns = "N" if lat_min >= 0 else "S"
+        ew = "E" if lon_min >= 0 else "W"
+        output = args.output or Path(
+            f"data/1km/predictors_new/glo30/copernicus_glo30_{ns}{abs(int(lat_min)):02d}_{ew}{abs(int(lon_min)):03d}.tif"
+        )
+        build(
+            lon_min,
+            lat_min,
+            lon_max,
+            lat_max,
+            output,
+            out_transform,
+            out_width,
+            out_height,
+            col_offset,
+            row_offset,
+        )
+    elif args.region == "global":
+        out_dir = args.output or Path("data/1km/predictors_new/glo30")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        grid = args.grid_size
+
+        print("Fetching tile index from S3 (once for all cells)...")
+        valid = available_tiles()
+
+        for lat_s in range(-90, 90, grid):
+            for lon_w in range(-180, 180, grid):
+                lat_n = min(90, lat_s + grid)
+                lon_e = min(180, lon_w + grid)
+                ns = "N" if lat_s >= 0 else "S"
+                ew = "E" if lon_w >= 0 else "W"
+                name = f"copernicus_glo30_{ns}{abs(lat_s):02d}_{ew}{abs(lon_w):03d}.tif"
+                output = out_dir / name
+                out_transform, out_width, out_height, col_offset, row_offset = (
+                    bbox_to_ref_subgrid(lon_w, lat_s, lon_e, lat_n)
+                )
+                build(
+                    lon_w,
+                    lat_s,
+                    lon_e,
+                    lat_n,
+                    output,
+                    out_transform,
+                    out_width,
+                    out_height,
+                    col_offset,
+                    row_offset,
+                    valid=valid,
+                )
     else:
-        bbox = SWITZERLAND_BBOX if args.region == "switzerland" else EUROPE_BBOX
+        region = args.region or "switzerland"
+        bbox = SWITZERLAND_BBOX if region == "switzerland" else EUROPE_BBOX
         out_transform, out_width, out_height, col_offset, row_offset = (
             bbox_to_ref_subgrid(*bbox)
         )
         output = args.output or Path(
-            f"data/1km/predictors_new/glo30/copernicus_glo30_{args.region}.tif"
+            f"data/1km/predictors_new/glo30/copernicus_glo30_{region}.tif"
         )
-
-    build(*bbox, output, out_transform, out_width, out_height, col_offset, row_offset)
+        build(
+            *bbox, output, out_transform, out_width, out_height, col_offset, row_offset
+        )
 
 
 if __name__ == "__main__":
