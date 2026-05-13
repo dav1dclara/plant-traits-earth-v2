@@ -6,9 +6,7 @@ outputs/
 .vscode/
 
 # Data
-data/**
-!data/**/
-!data/**/README.md
+data/
 viz/
 
 # QGIS
