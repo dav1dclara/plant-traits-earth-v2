@@ -166,6 +166,28 @@ python -m venv ~/venvs/plant-traits
 source ~/venvs/plant-traits/bin/activate
 ```
 
+# 6. Zip and transfer chips to Euler
+
+First, zip the Zarr stores:
+
+```bash
+cd data/1km/chips/patch128_stride64
+
+zip -0 -r train.zip train.zarr -x "*.DS_Store"
+zip -0 -r val.zip   val.zarr   -x "*.DS_Store"
+zip -0 -r test.zip  test.zarr  -x "*.DS_Store"
+```
+
+Transfer to Euler via `rsync`:
+
+```bash
+rsync -avh --progress \
+   data/1km/chips/patch128_stride64/train.zip \
+   data/1km/chips/patch128_stride64/val.zip \
+   data/1km/chips/patch128_stride64/test.zip \
+   dclara@euler.ethz.ch:"/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64/"
+```
+
 ## Cheatsheet
 
 ```bash
