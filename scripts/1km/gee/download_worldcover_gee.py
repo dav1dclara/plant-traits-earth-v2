@@ -91,7 +91,10 @@ def download_tile(
         return
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    region = ee.Geometry.BBox(lon_min, lat_min, lon_max, lat_max)
+    # Avoid passing exactly -180 to BBox: GEE treats -180≡+180 and interprets
+    # BBox(+180, ..., -165, ...) as crossing the antimeridian, producing wrong output.
+    bbox_lon_min = max(lon_min, -179.9999)
+    region = ee.Geometry.BBox(bbox_lon_min, lat_min, lon_max, lat_max)
     _, _, crs_transform = snap_to_grid(lon_min, lat_min, lon_max, lat_max)
 
     geemap.ee_export_image(
@@ -115,7 +118,18 @@ def download_tile(
         if not (data != NODATA).any():
             output.unlink()
             return
-        profile = src.profile | {"nodata": NODATA}
+        # GEE canonicalizes lon=-180 → +180; fix so the merge places the tile correctly.
+        transform = src.transform
+        if abs(transform.c - 180.0) < 1e-6 and lon_min < -179.9:
+            transform = Affine(
+                transform.a,
+                transform.b,
+                transform.c - 360.0,
+                transform.d,
+                transform.e,
+                transform.f,
+            )
+        profile = src.profile | {"nodata": NODATA, "transform": transform}
         with rasterio.open(tmp, "w", **profile) as dst:
             dst.write(data)
     tmp.replace(output)
@@ -174,6 +188,18 @@ def main():
             key=lambda c: c[0] ** 2 + c[1] ** 2,
         )
 
+        already_done = sum(
+            1
+            for lat_s, lon_w in cells
+            if (
+                out_dir
+                / f"worldcover_land_mask_{'N' if lat_s >= 0 else 'S'}{abs(lat_s):02d}_{'E' if lon_w >= 0 else 'W'}{abs(lon_w):03d}.tif"
+            ).exists()
+        )
+        print(
+            f"{already_done}/{len(cells)} tiles already downloaded, {len(cells) - already_done} remaining."
+        )
+
         progress = Progress(
             TextColumn("[bold blue]{task.description}"),
             BarColumn(),
@@ -184,13 +210,17 @@ def main():
             TimeRemainingColumn(),
         )
         with progress:
-            task = progress.add_task("Downloading tiles", total=len(cells))
+            task = progress.add_task(
+                "Downloading tiles", total=len(cells) - already_done
+            )
             for lat_s, lon_w in cells:
                 lat_n = min(90, lat_s + grid)
                 lon_e = min(180, lon_w + grid)
                 ns = "N" if lat_s >= 0 else "S"
                 ew = "E" if lon_w >= 0 else "W"
                 name = f"worldcover_land_mask_{ns}{abs(lat_s):02d}_{ew}{abs(lon_w):03d}.tif"
+                if (out_dir / name).exists():
+                    continue
                 download_tile(land_mask, lon_w, lat_s, lon_e, lat_n, out_dir / name)
                 progress.advance(task)
 
