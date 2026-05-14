@@ -1,0 +1,39 @@
+# Trait-grouped Gated MMoE V3 — analysis-motivated architecture.
+#
+# Model class: GatedMMoEModelV3  (src/ptev2/models/tuned_mmoe.py)
+#
+# Design from trait_correlation_analysis.ipynb (Ward-8 clusters, d = 1 - |r|):
+#
+# Hard-trait bypass  →  X223, X282, X289, X297  (0-based indices: 11, 17, 18, 19)
+#   These traits have near-zero EO predictability AND near-zero inter-trait |r|.
+#   Each gets a private ResidualBlock + head. No cross-task routing.
+#   The analysis showed excluding them improves mean test r by +0.0176.
+#
+# Soft traits (33)  →  routed through 8-expert MMoE (one expert per Ward cluster)
+#   C0  Water/root mix      : X3120, X4, X47, X6
+#   C1  Size/propagule mix  : X1080, X21, X237, X26, X27, X3106, X3107, X614, X95
+#   C2  Leaf size/mass TIGHT: X144, X145, X163, X3112, X3113, X3114, X55  |r|=0.793
+#   C3  Seed/conduit mix    : X138, X169, X224, X281
+#   C4  Leaf structure TIGHT: X3117, X46, X50                             |r|=0.749
+#   C5  Leaf chemistry      : X13, X14, X146, X15, X78
+#   C6  (bypassed: X282, X289)
+#   C7  Independent/hard    : X351  (X223, X297 bypassed)
+
+_target_: ptev2.models.tuned_mmoe.GatedMMoEModelV3
+
+# in_channels and out_channels are injected by the training script at instantiation time.
+
+# Hard-trait bypass: 0-based indices for X223, X282, X289, X297
+hard_trait_indices: [11, 17, 18, 19]
+
+# MMoE for the remaining 33 soft traits
+n_experts: 8            # one per Ward cluster (C0-C7)
+expert_hidden: 96
+base_channels: 48
+norm: gn
+gn_groups: 8
+stride_blocks: [1, 1, 1, 1]
+gate_temperature: 0.8   # softer distribution with 8 experts (0.4 was for 4)
+gate_top_k: 2           # 2/8 = 25% expert utilisation per trait
+residual_scale: 0.0
+dropout_p: 0.1
