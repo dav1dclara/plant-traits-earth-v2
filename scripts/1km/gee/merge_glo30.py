@@ -22,6 +22,7 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from scipy.ndimage import uniform_filter
 
 REF_CRS = CRS.from_epsg(6933)
 REF_TRANSFORM = Affine(
@@ -37,6 +38,8 @@ def main():
         "--input-dir", type=Path, default=Path("data/1km/predictors_new/glo30")
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--gap-fill", action="store_true", default=True)
+    parser.add_argument("--no-gap-fill", dest="gap_fill", action="store_false")
     args = parser.parse_args()
 
     parts = sorted(
@@ -91,6 +94,26 @@ def main():
                 existing[mask] = data[mask]
                 dst.write(existing[np.newaxis], window=window)
             progress.advance(task)
+
+    if not args.gap_fill:
+        print(f"Written: {output}")
+        return
+
+    print("Gap-filling NaN stripes...")
+    with rasterio.open(output, "r+") as dst:
+        data = dst.read(1)
+        nan_mask = np.isnan(data)
+        if nan_mask.any():
+            valid = (~nan_mask).astype(np.float32)
+            data_zero = np.where(nan_mask, 0.0, data)
+            neighbor_sum = uniform_filter(data_zero, size=3) * 9
+            neighbor_count = uniform_filter(valid, size=3) * 9
+            with np.errstate(divide="ignore", invalid="ignore"):
+                fill = np.where(
+                    neighbor_count > 0, neighbor_sum / neighbor_count, np.nan
+                )
+            data[nan_mask] = fill[nan_mask]
+            dst.write(data[np.newaxis])
 
     print(f"Written: {output}")
 

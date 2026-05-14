@@ -22,6 +22,8 @@ import re
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+warnings.filterwarnings("ignore", category=UserWarning, module="rasterio")
 from pathlib import Path
 
 import numpy as np
@@ -94,16 +96,24 @@ def tile_url(lat: int, lon: int) -> str:
     return f"{BASE_URL}/{name}/{name}.tif"
 
 
-def bbox_to_ref_subgrid(lon_min, lat_min, lon_max, lat_max):
+def bbox_to_ref_subgrid(lon_min, lat_min, lon_max, lat_max, padding=0):
     """Return (transform, width, height) for the ref grid subregion covering the bbox."""
     t = Transformer.from_crs("EPSG:4326", REF_CRS, always_xy=True)
     xs, ys = t.transform(
         [lon_min, lon_min, lon_max, lon_max], [lat_min, lat_max, lat_min, lat_max]
     )
-    col_min = max(0, math.floor((min(xs) - REF_TRANSFORM.c) / REF_TRANSFORM.a))
-    col_max = min(REF_WIDTH, math.ceil((max(xs) - REF_TRANSFORM.c) / REF_TRANSFORM.a))
-    row_min = max(0, math.floor((max(ys) - REF_TRANSFORM.f) / REF_TRANSFORM.e))
-    row_max = min(REF_HEIGHT, math.ceil((min(ys) - REF_TRANSFORM.f) / REF_TRANSFORM.e))
+    col_min = max(
+        0, math.floor((min(xs) - REF_TRANSFORM.c) / REF_TRANSFORM.a) - padding
+    )
+    col_max = min(
+        REF_WIDTH, math.ceil((max(xs) - REF_TRANSFORM.c) / REF_TRANSFORM.a) + padding
+    )
+    row_min = max(
+        0, math.floor((max(ys) - REF_TRANSFORM.f) / REF_TRANSFORM.e) - padding
+    )
+    row_max = min(
+        REF_HEIGHT, math.ceil((min(ys) - REF_TRANSFORM.f) / REF_TRANSFORM.e) + padding
+    )
 
     transform = Affine(
         REF_TRANSFORM.a,
@@ -271,8 +281,8 @@ def main():
     parser.add_argument(
         "--grid-size",
         type=int,
-        default=30,
-        help="Grid cell size in degrees for global mode (default: 30)",
+        default=15,
+        help="Grid cell size in degrees for global mode (default: 15)",
     )
     args = parser.parse_args()
 
@@ -315,7 +325,7 @@ def main():
                 name = f"copernicus_glo30_{ns}{abs(lat_s):02d}_{ew}{abs(lon_w):03d}.tif"
                 output = out_dir / name
                 out_transform, out_width, out_height, col_offset, row_offset = (
-                    bbox_to_ref_subgrid(lon_w, lat_s, lon_e, lat_n)
+                    bbox_to_ref_subgrid(lon_w, lat_s, lon_e, lat_n, padding=5)
                 )
                 build(
                     lon_w,
