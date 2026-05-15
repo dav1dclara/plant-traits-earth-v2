@@ -11,21 +11,22 @@
 module restore plant-traits
 source /cluster/home/dclara/venvs/plant-traits/bin/activate
 
-# Unzip chips to scratch if not already done
-CHIPS_DIR=/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64
-SCRATCH=/cluster/scratch/dclara/plant-traits-1km/chips/patch128_stride64
+CHIPS_SRC=/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64
 
-mkdir -p $SCRATCH
+# Option A (default): copy .h5 files to $TMPDIR for fastest local I/O.
+# Option B: read directly from LUSTRE — skip the cp block and set CHIPS_DIR=$CHIPS_SRC.
+#   h5py issues large sequential reads that LUSTRE handles well, so this is viable
+#   when $TMPDIR is too small (~120 GB total for all three splits uncompressed).
+
+CHIPS_DIR=$TMPDIR/chips/patch128_stride64
+mkdir -p $CHIPS_DIR
+
 for SPLIT in train val test; do
-    if [ ! -d $SCRATCH/${SPLIT}.zarr ]; then
-        echo "Unzipping ${SPLIT}.zip to scratch..."
-        unzip -q $CHIPS_DIR/${SPLIT}.zip -d $SCRATCH/
-    else
-        echo "${SPLIT}.zarr already in scratch, skipping."
-    fi
+    echo "Copying ${SPLIT}.h5 to local scratch..."
+    cp $CHIPS_SRC/${SPLIT}.h5 $CHIPS_DIR/
 done
 
 # Run training
 cd /cluster/home/dclara/plant-traits-earth-v2
 python scripts/1km/train.py \
-    data.root_dir=$SCRATCH/ \
+    data.root_dir=$TMPDIR/
