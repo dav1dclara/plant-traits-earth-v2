@@ -9,23 +9,19 @@
 
 # Load modules and activate venv
 module restore plant-traits
-source /cluster/home/dclara/venvs/plant-traits/bin/activate
+source ~/venvs/plant-traits/bin/activate
 
-# Unzip chips to scratch if not already done
+# Copy zarr zips to local NVMe scratch for fast random access
 CHIPS_DIR=/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64
-SCRATCH=/cluster/scratch/dclara/plant-traits-1km/chips/patch128_stride64
+LOCAL=$TMPDIR/chips
+mkdir -p $LOCAL
 
-mkdir -p $SCRATCH
-for SPLIT in train val test; do
-    if [ ! -d $SCRATCH/${SPLIT}.zarr ]; then
-        echo "Unzipping ${SPLIT}.zip to scratch..."
-        unzip -q $CHIPS_DIR/${SPLIT}.zip -d $SCRATCH/
-    else
-        echo "${SPLIT}.zarr already in scratch, skipping."
-    fi
-done
+echo "Copying chips to local scratch ($TMPDIR)..."
+cp $CHIPS_DIR/train.zarr.zip $CHIPS_DIR/val.zarr.zip $CHIPS_DIR/test.zarr.zip $LOCAL/
+echo "Done. $(du -sh $LOCAL)"
 
 # Run training
-cd /cluster/home/dclara/plant-traits-earth-v2
+cd ~/plant-traits-earth-v2
 python scripts/1km/train.py \
-    data.root_dir=$SCRATCH/ \
+    data.root_dir=$LOCAL/ \
+    data_loaders.num_workers=4
