@@ -7,7 +7,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.tree import Tree
 
-ZARR_DIR = "/scratch3/plant-traits-v2/data/1km/chips/patch256_stride256/"
+ZARR_DIR = (
+    "/Users/david/workdir/plant-traits-earth-v2/data/1km/chips/patch128_stride64/"
+)
 SPLITS = ["train", "val", "test"]
 
 console = Console()

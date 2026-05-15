@@ -8,7 +8,7 @@ data:
   resolution_km: 1
   chips_dirname: chips
   patch_size: 128
-  stride: 128
+  stride: 64
 
   predictors:
     canopy_height:

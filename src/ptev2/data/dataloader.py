@@ -9,6 +9,24 @@ import zarr
 from torch.utils.data import DataLoader, Dataset
 
 
+def _resolve_zarr_path(zarr_dir: Path, split: str) -> Path:
+    zip_path = zarr_dir / f"{split}.zarr.zip"
+    dir_path = zarr_dir / f"{split}.zarr"
+    if zip_path.exists():
+        return zip_path
+    if dir_path.exists():
+        return dir_path
+    raise FileNotFoundError(f"{split} zarr store not found at {zarr_dir}")
+
+
+def _open_zarr(zarr_path: Path) -> zarr.Group:
+    if str(zarr_path).endswith(".zip"):
+        return zarr.open_group(
+            zarr.storage.ZipStore(str(zarr_path), mode="r"), mode="r"
+        )
+    return zarr.open_group(str(zarr_path), mode="r")
+
+
 class PlantTraitDataset(Dataset):
     """PyTorch Dataset for spatially pre-extracted Earth Observation chips paired with plant trait observations.
 
@@ -30,7 +48,7 @@ class PlantTraitDataset(Dataset):
         return_target_bundle: bool = True,
         chip_indices: np.ndarray | None = None,
     ):
-        self.store = zarr.open_group(str(zarr_path), mode="r")
+        self.store = _open_zarr(zarr_path)
         self.predictors = predictors
         self.target_layouts = target_layouts or {}
         self.return_target_bundle = bool(return_target_bundle)
@@ -110,11 +128,8 @@ def get_dataloader(
         raise ValueError(
             f"split must be one of ['train', 'val', 'test'], got '{split}'"
         )
-    zarr_path = zarr_dir / f"{split}.zarr"
-    if not zarr_path.exists():
-        raise FileNotFoundError(f"{split} zarr store not found at {zarr_path}")
-
-    base_store = zarr.open_group(str(zarr_path), mode="r")
+    zarr_path = _resolve_zarr_path(zarr_dir, split)
+    base_store = _open_zarr(zarr_path)
     n_total = int(base_store[f"predictors/{predictors[0]}"].shape[0])
     split_fraction = float(split_fraction)
     if not (0.0 < split_fraction <= 1.0):
