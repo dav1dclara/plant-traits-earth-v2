@@ -159,13 +159,13 @@ The job ends automatically at the `--time=` limit. To kill it early: `scancel <j
 
 The training dataloader prefers HDF5 (`.h5`) over zarr. HDF5 uses synchronous I/O, which is significantly faster than zarr v3's async pipeline.
 
-**One-time conversion** (run locally, requires the `.zarr.zip` files):
+Run the chipping script to produce `.h5` files directly:
 
 ```bash
-python scripts/1km/convert_zarr_to_hdf5.py
+python scripts/1km/chipping/chip_rasters_hdf5.py
 ```
 
-This writes `train.h5`, `val.h5`, `test.h5` alongside the existing `.zarr.zip` files. Add `--compress` for gzip level-1 compression (smaller files, negligible read overhead).
+This writes `train.h5`, `val.h5`, `test.h5` with gzip level-1 compression (roughly the same size as the old `.zarr.zip` files).
 
 **Transfer to Euler** via `rsync`:
 

@@ -4,6 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 os.environ.setdefault("GDAL_CACHEMAX", "256")
 
@@ -176,6 +177,110 @@ def _init_zarr_store(
     return store, arrays, bounds_arr
 
 
+def _init_hdf5_store(
+    path: Path,
+    n_chips: int,
+    split_name: str,
+    predictors: dict,
+    targets: dict,
+    all_srcs: dict,
+    patch_size: int,
+    stride: int,
+    crs,
+    transform,
+    raster_height: int,
+    raster_width: int,
+    overwrite: bool,
+    target_bands: dict[str, list[int]] | None = None,
+):
+    """Create and pre-allocate an HDF5 file for a single split.
+
+    Returns (h5_file, arrays_dict, bounds_dataset) with the same structure as
+    _init_zarr_store so the chipping inner loop can treat both backends identically.
+    Both array datasets and the bounds dataset support slice assignment and resize().
+    """
+    import h5py
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if overwrite:
+            path.unlink()
+        else:
+            raise FileExistsError(
+                f"Refusing to overwrite existing HDF5 store: {path}. "
+                "Set settings.overwrite=true to allow replacing existing chips."
+            )
+
+    f = h5py.File(path, "w")
+    f.attrs["split"] = split_name
+    f.attrs["crs_epsg"] = crs.to_epsg()
+    f.attrs["res_km"] = list([transform.a, abs(transform.e)])
+    f.attrs["transform"] = list(transform)
+    f.attrs["patch_size"] = patch_size
+    f.attrs["stride"] = stride
+    f.attrs["raster_height"] = raster_height
+    f.attrs["raster_width"] = raster_width
+    f.attrs["creation_date"] = datetime.now().isoformat(timespec="seconds")
+
+    pred_grp = f.require_group("predictors")
+    tgt_grp = f.require_group("targets")
+
+    first_tgt_name = next(iter(targets))
+    first_tgt_srcs = all_srcs[first_tgt_name]
+    if target_bands and first_tgt_name in target_bands:
+        bands_sel = target_bands[first_tgt_name]
+        band_names = []
+        for src in first_tgt_srcs:
+            descs = list(src.descriptions)
+            band_names.extend(descs[b - 1] or f"band{b}" for b in bands_sel)
+        tgt_grp.attrs["band_names"] = band_names
+    else:
+        band_names = []
+        for src in first_tgt_srcs:
+            band_names.extend(
+                d or f"band{i + 1}" for i, d in enumerate(src.descriptions)
+            )
+        tgt_grp.attrs["band_names"] = band_names
+
+    arrays = {}
+    for name, group, group_name in [(n, pred_grp, "predictors") for n in predictors] + [
+        (n, tgt_grp, "targets") for n in targets
+    ]:
+        srcs = all_srcs[name]
+        if name in targets and target_bands and name in target_bands:
+            n_bands = len(srcs) * len(target_bands[name])
+        else:
+            n_bands = sum(src.count for src in srcs)
+        shape = (n_chips, n_bands, patch_size, patch_size)
+        chunk_shape = (1, n_bands, patch_size, patch_size)
+        arrays[name] = group.create_dataset(
+            name,
+            shape=shape,
+            maxshape=(None, n_bands, patch_size, patch_size),
+            dtype=np.float32,
+            chunks=chunk_shape,
+            compression="gzip",
+            compression_opts=1,
+        )
+        arrays[name].attrs["files"] = [Path(src.name).name for src in srcs]
+        console.print(
+            f"  [cyan]{group_name}/{name}[/cyan]: {n_chips} × {n_bands} bands "
+            f"[dim]→ {shape}[/dim]"
+        )
+
+    bounds_ds = f.create_dataset(
+        "bounds",
+        shape=(n_chips, 4),
+        maxshape=(None, 4),
+        dtype=np.float64,
+        chunks=(1024, 4),
+        compression="gzip",
+        compression_opts=1,
+    )
+
+    return f, arrays, bounds_ds
+
+
 def chip_rasters_to_zarr(
     predictors: dict[str, list[Path]],
     targets: dict[str, list[Path]],
@@ -193,6 +298,7 @@ def chip_rasters_to_zarr(
     require_valid_target: bool = True,
     overwrite: bool = False,
     target_bands: dict[str, list[int]] | None = None,
+    backend: Literal["zarr", "hdf5"] = "zarr",
 ) -> None:
     """Chip predictor and target rasters into one zarr store per split.
 
@@ -349,18 +455,25 @@ def chip_rasters_to_zarr(
         if "all" in group_splits:
             n_chips_per["all"] = int(np.sum(overlap_grids[-1]))
 
-        # Allocate zarr stores and buffers for each split in this group
+        # Allocate stores and buffers for each split in this group
         split_arrays = {}
         split_bounds_arrs = {}
+        split_files = {}  # h5py file handles (kept alive until end of stride group)
         for split_name in group_splits:
             if n_chips_per[split_name] == 0:
                 continue
             console.print(
                 f"[bold]{split_name}[/bold]: {n_chips_per[split_name]:,} chips"
             )
-            _, split_arrays[split_name], split_bounds_arrs[split_name] = (
-                _init_zarr_store(
-                    path=output_dir / f"{split_name}.zarr",
+            if backend == "hdf5":
+                ext = ".h5"
+                init_fn = _init_hdf5_store
+            else:
+                ext = ".zarr"
+                init_fn = _init_zarr_store
+            file_handle, split_arrays[split_name], split_bounds_arrs[split_name] = (
+                init_fn(
+                    path=output_dir / f"{split_name}{ext}",
                     n_chips=n_chips_per[split_name],
                     split_name=split_name,
                     predictors=predictors,
@@ -376,6 +489,8 @@ def chip_rasters_to_zarr(
                     target_bands=target_bands,
                 )
             )
+            if backend == "hdf5":
+                split_files[split_name] = file_handle
 
         bufs = {
             split_name: {
@@ -613,6 +728,9 @@ def chip_rasters_to_zarr(
                         f"  [bold]{split_name}[/bold]: kept {n_written:,}, "
                         f"skipped {int(skipped_invalid_target[split_name]):,} invalid-target chips"
                     )
+
+        for f in split_files.values():
+            f.close()
 
     for srcs in all_srcs.values():
         for src in srcs:
