@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 data:
-  root_dir: /Users/david/workdir/plant-traits-earth-v2/data/  # TODO: revert to /scratch3/plant-traits-v2/data/
+  root_dir: /cluster/work/igp_psr/plant-traits-earth-v2/data/
   resolution_km: 1
   chips_dirname: chips
   patch_size: 128
@@ -13,18 +13,26 @@ data:
   predictors:
     canopy_height:
       use: true
+    modis:
+      use: true
+    soilgrids:
+      use: true
+    vodca:
+      use: true
+    worldclim:
+      use: true
 
   targets:
     mode: source_weighted
     primary_dataset: splot
     auxiliary_dataset: gbif
     eval_dataset: splot
-    traits: ["1080"]
+    traits: []
     bands: [mean]
 
 data_loaders:
   batch_size: 4
-  num_workers: 0  # TODO: set to 8 on cluster
+  num_workers: 4
   train_fraction: 1.0
   val_fraction: 1.0
   subset_seed: 0
@@ -84,7 +92,7 @@ mmoe:
     - [3114, 14, 15, 78, 95, 223, 614, 1080, 3117, 3120]
     - [26, 6, 21, 27, 138, 224, 282, 289]
 
-checkpoint_dir: /Users/david/workdir/plant-traits-earth-v2/data/checkpoints/1km/  # TODO: revert to /scratch3/plant-traits-v2/checkpoints/1km/
+checkpoint_dir: /cluster/work/igp_psr/plant-traits-earth-v2/checkpoints/1km/
 
 wandb:
   enabled: true
