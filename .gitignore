@@ -38,3 +38,5 @@ PTEV2/results
 /results
 scripts/Checkpoints_Scores
 scripts/__temp_dev
+
+logs/

@@ -23,5 +23,5 @@ echo "Done. $(du -sh $LOCAL)"
 # Run training
 cd ~/plant-traits-earth-v2
 python scripts/1km/train.py \
-    data.root_dir=$LOCAL/ \
+    +data.zarr_dir=$LOCAL \
     data_loaders.num_workers=4

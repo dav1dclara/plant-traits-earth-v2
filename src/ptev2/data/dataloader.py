@@ -48,7 +48,8 @@ class PlantTraitDataset(Dataset):
         return_target_bundle: bool = True,
         chip_indices: np.ndarray | None = None,
     ):
-        self.store = _open_zarr(zarr_path)
+        self._zarr_path = Path(zarr_path)
+        self._store: zarr.Group | None = None
         self.predictors = predictors
         self.target_layouts = target_layouts or {}
         self.return_target_bundle = bool(return_target_bundle)
@@ -61,12 +62,20 @@ class PlantTraitDataset(Dataset):
             raise ValueError(
                 "target_layouts must be provided when return_target_bundle=True."
             )
-        self._all_n_chips = self.store[f"predictors/{predictors[0]}"].shape[0]
+        # Open temporarily to read metadata — do not cache so workers fork with _store=None
+        tmp = _open_zarr(self._zarr_path)
+        self._all_n_chips = tmp[f"predictors/{predictors[0]}"].shape[0]
+        del tmp
         if chip_indices is None:
             self.chip_indices = np.arange(self._all_n_chips, dtype=np.int64)
         else:
             self.chip_indices = np.asarray(chip_indices, dtype=np.int64)
         self.n_chips = int(self.chip_indices.shape[0])
+
+    def _get_store(self) -> zarr.Group:
+        if self._store is None:
+            self._store = _open_zarr(self._zarr_path)
+        return self._store
 
     def __len__(self) -> int:
         return self.n_chips
@@ -81,10 +90,11 @@ class PlantTraitDataset(Dataset):
         )
 
     def __getitem__(self, idx: int):
+        store = self._get_store()
         store_idx = int(self.chip_indices[idx])
         X = torch.cat(
             [
-                torch.as_tensor(self.store[f"predictors/{name}"][store_idx])
+                torch.as_tensor(store[f"predictors/{name}"][store_idx])
                 for name in self.predictors
             ],
             dim=0,
@@ -92,7 +102,7 @@ class PlantTraitDataset(Dataset):
 
         bundle: dict[str, dict[str, torch.Tensor]] = {}
         for dataset_name, layout in self.target_layouts.items():
-            y_full = torch.as_tensor(self.store[f"targets/{dataset_name}"][store_idx])
+            y_full = torch.as_tensor(store[f"targets/{dataset_name}"][store_idx])
             trait_positions = layout.get("trait_positions") or layout["target_indices"]
             y = y_full[trait_positions]
             source_indices = layout.get("source_indices") or []
