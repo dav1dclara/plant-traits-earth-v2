@@ -155,46 +155,23 @@ Or in VS Code: `Cmd/Ctrl + Shift + P` → "Remote-SSH: Connect to Host..." → `
 
 The job ends automatically at the `--time=` limit. To kill it early: `scancel <jobid>`.
 
-## 5. Environment
-
-Load the required modules:
-
-```bash
-module purge
-module load stack/2025-06
-module load gcc/12.2.0
-module load python/3.13.0
-```
-
-Create a venv in your home directory and activate it:
-
-```bash
-python -m venv ~/venvs/plant-traits
-source ~/venvs/plant-traits/bin/activate
-```
-
 # 6. Zip and transfer chips to Euler
 
-First, zip the Zarr stores:
+First, zip the Zarr stores using the pack script:
 
 ```bash
-cd data/1km/chips/patch128_stride64
-
-zip -0 -r train.zip train.zarr -x "*.DS_Store"
-zip -0 -r val.zip   val.zarr   -x "*.DS_Store"
-zip -0 -r test.zip  test.zarr  -x "*.DS_Store"
+python scripts/1km/chipping/pack_zarr_zip.py
 ```
 
 Transfer to Euler via `rsync`:
 
 ```bash
 rsync -avh --progress \
-   data/1km/chips/patch128_stride64/train.zip \
-   data/1km/chips/patch128_stride64/val.zip \
-   data/1km/chips/patch128_stride64/test.zip \
+   data/1km/chips/patch128_stride64/train.zarr.zip \
+   data/1km/chips/patch128_stride64/val.zarr.zip \
+   data/1km/chips/patch128_stride64/test.zarr.zip \
    dclara@euler.ethz.ch:"/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64/"
 ```
-
 ## Cheatsheet
 
 ```bash
