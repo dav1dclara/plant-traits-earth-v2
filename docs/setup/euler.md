@@ -57,6 +57,12 @@ cd ~
 git clone git@github.com:dav1dclara/plant-traits-earth-v2.git
 ```
 
+> **Compute nodes block port 22**, so `git pull` over SSH will fail inside a tunnel session. Switch the remote to HTTPS once after cloning:
+> ```bash
+> git remote set-url origin https://github.com/dav1dclara/plant-traits-earth-v2.git
+> ```
+> You will be prompted for your GitHub credentials — use a [personal access token](https://github.com/settings/tokens) as the password.
+
 ## 4. Environment
 
 Load the required modules:
@@ -66,6 +72,7 @@ module purge
 module load stack/2025-06
 module load gcc/12.2.0
 module load python/3.13.0
+module load eth_proxy
 ```
 
 Save the module set so you don't have to retype it every session:
