@@ -12,19 +12,19 @@ Global reference grid (EPSG:4326):
 
 Usage:
     # Test with Switzerland:
-    python download_glo30_gee.py
+    python download_glo30.py
 
     # Full global coverage (5° tiles, land mask pre-filtering):
-    python download_glo30_gee.py --region global
+    python download_glo30.py --region global
 
     # Full global coverage with larger tiles (15°, faster but less reliable):
-    python download_glo30_gee.py --region global --grid-size 15
+    python download_glo30.py --region global --grid-size 15
 
     # Custom bbox:
-    python download_glo30_gee.py --bbox 5 45 11 48
+    python download_glo30.py --bbox 5 45 11 48
 
     # Custom land mask (default: data/1km/predictors_new/worldcover/worldcover_land_mask.tif):
-    python download_glo30_gee.py --region global --land-mask path/to/worldcover_land_mask.tif
+    python download_glo30.py --region global --land-mask path/to/worldcover_land_mask.tif
 
 Requires: earthengine-api, geemap, rasterio, numpy
 """
@@ -227,7 +227,7 @@ def main():
         ns = "N" if lat_min >= 0 else "S"
         ew = "E" if lon_min >= 0 else "W"
         output = args.output or Path(
-            f"data/1km/predictors_new/glo30_gee/copernicus_glo30_{ns}{abs(int(lat_min)):02d}_{ew}{abs(int(lon_min)):03d}.tif"
+            f"data/1km/predictors_new/glo30/copernicus_glo30_{ns}{abs(int(lat_min)):02d}_{ew}{abs(int(lon_min)):03d}.tif"
         )
         download_tile(dem, lon_min, lat_min, lon_max, lat_max, output)
 
@@ -241,7 +241,7 @@ def main():
             TimeRemainingColumn,
         )
 
-        out_dir = args.output or Path("data/1km/predictors_new/glo30_gee")
+        out_dir = args.output or Path("data/1km/predictors_new/glo30")
         out_dir.mkdir(parents=True, exist_ok=True)
         grid = args.grid_size
 
@@ -314,7 +314,7 @@ def main():
         region = args.region or "switzerland"
         bbox = SWITZERLAND_BBOX if region == "switzerland" else EUROPE_BBOX
         output = args.output or Path(
-            f"data/1km/predictors_new/glo30_gee/copernicus_glo30_{region}.tif"
+            f"data/1km/predictors_new/glo30/copernicus_glo30_{region}.tif"
         )
         download_tile(dem, *bbox, output)
 

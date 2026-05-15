@@ -1,13 +1,13 @@
 """
 Merge all copernicus_glo30_*.tif tiles into a single global mosaic.
 
-Tiles must be aligned to the global reference grid defined in download_glo30_gee.py
+Tiles must be aligned to the global reference grid defined in download_glo30.py
 (EPSG:4326, ~0.008982°/pixel, origin at -180°/90°). Skips .tmp.tif files.
 Existing valid pixels (non-NaN) take priority over nodata (NaN).
 
 Usage:
-    python merge_glo30_gee.py
-    python merge_glo30_gee.py --input-dir data/1km/predictors_new/glo30_gee --output copernicus_glo30.tif
+    python merge_glo30.py
+    python merge_glo30.py --input-dir data/1km/predictors_new/glo30 --output copernicus_glo30.tif
 """
 
 import argparse
@@ -33,7 +33,7 @@ GLOBAL_HEIGHT = round(180.0 / GLOBAL_RES)  # 20040
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--input-dir", type=Path, default=Path("data/1km/predictors_new/glo30_gee")
+        "--input-dir", type=Path, default=Path("data/1km/predictors_new/glo30")
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

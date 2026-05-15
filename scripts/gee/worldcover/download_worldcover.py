@@ -16,10 +16,10 @@ Global reference grid (EPSG:4326):
 
 Usage:
     # Test with Switzerland:
-    python download_worldcover_gee.py
+    python download_worldcover.py
 
     # Full global coverage:
-    python download_worldcover_gee.py --region global
+    python download_worldcover.py --region global
 
 Requires: earthengine-api, geemap, rasterio
 """

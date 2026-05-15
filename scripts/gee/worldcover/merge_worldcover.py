@@ -1,7 +1,7 @@
 """
 Merge all worldcover_land_mask_*.tif tiles into a single global mosaic.
 
-Tiles must be aligned to the global reference grid defined in download_worldcover_gee.py
+Tiles must be aligned to the global reference grid defined in download_worldcover.py
 (EPSG:4326, ~0.008982°/pixel, origin at -180°/90°). Skips .tmp.tif files.
 Existing valid pixels (0 or 1) take priority over nodata (255).
 
