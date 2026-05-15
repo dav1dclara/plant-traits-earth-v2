@@ -155,23 +155,29 @@ Or in VS Code: `Cmd/Ctrl + Shift + P` → "Remote-SSH: Connect to Host..." → `
 
 The job ends automatically at the `--time=` limit. To kill it early: `scancel <jobid>`.
 
-# 6. Zip and transfer chips to Euler
+# 6. Convert and transfer chips to Euler
 
-First, zip the Zarr stores using the pack script:
+The training dataloader prefers HDF5 (`.h5`) over zarr. HDF5 uses synchronous I/O, which is significantly faster than zarr v3's async pipeline.
+
+**One-time conversion** (run locally, requires the `.zarr.zip` files):
 
 ```bash
-python scripts/1km/chipping/pack_zarr_zip.py
+python scripts/1km/convert_zarr_to_hdf5.py
 ```
 
-Transfer to Euler via `rsync`:
+This writes `train.h5`, `val.h5`, `test.h5` alongside the existing `.zarr.zip` files. Add `--compress` for gzip level-1 compression (smaller files, negligible read overhead).
+
+**Transfer to Euler** via `rsync`:
 
 ```bash
 rsync -avh --progress \
-   data/1km/chips/patch128_stride64/train.zarr.zip \
-   data/1km/chips/patch128_stride64/val.zarr.zip \
-   data/1km/chips/patch128_stride64/test.zarr.zip \
+   data/1km/chips/patch128_stride64/train.h5 \
+   data/1km/chips/patch128_stride64/val.h5 \
+   data/1km/chips/patch128_stride64/test.h5 \
    dclara@euler.ethz.ch:"/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64/"
 ```
+
+The `.zarr.zip` files can be kept as a backup; the dataloader automatically selects `.h5` when present.
 ## Cheatsheet
 
 ```bash

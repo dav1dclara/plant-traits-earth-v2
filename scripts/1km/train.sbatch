@@ -11,17 +11,22 @@
 module restore plant-traits
 source ~/venvs/plant-traits/bin/activate
 
-# Copy zarr zips to local NVMe scratch for fast random access
-CHIPS_DIR=/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64
-LOCAL=$TMPDIR/chips
-mkdir -p $LOCAL
+CHIPS_SRC=/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64
 
-echo "Copying chips to local scratch ($TMPDIR)..."
-cp $CHIPS_DIR/train.zarr.zip $CHIPS_DIR/val.zarr.zip $CHIPS_DIR/test.zarr.zip $LOCAL/
-echo "Done. $(du -sh $LOCAL)"
+# Option A (default): copy .h5 files to $TMPDIR for fastest local I/O.
+# Option B: read directly from LUSTRE — skip the cp block and set CHIPS_DIR=$CHIPS_SRC.
+#   h5py issues large sequential reads that LUSTRE handles well, so this is viable
+#   when $TMPDIR is too small (~120 GB total for all three splits uncompressed).
+
+CHIPS_DIR=$TMPDIR/chips/patch128_stride64
+mkdir -p $CHIPS_DIR
+
+for SPLIT in train val test; do
+    echo "Copying ${SPLIT}.h5 to local scratch..."
+    cp $CHIPS_SRC/${SPLIT}.h5 $CHIPS_DIR/
+done
 
 # Run training
 cd ~/plant-traits-earth-v2
 python scripts/1km/train.py \
-    +data.zarr_dir=$LOCAL \
-    data_loaders.num_workers=4
+    data.root_dir=$TMPDIR/
