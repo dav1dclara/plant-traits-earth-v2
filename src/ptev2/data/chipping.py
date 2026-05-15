@@ -27,7 +27,7 @@ from rich.progress import (
 
 console = Console()
 
-BUFFER_SIZE = 64
+BUFFER_SIZE = 512
 
 # Thread-local storage for rasterio file handles used during parallel strip reads.
 # Each worker thread keeps its own open handle per path so concurrent prefetch reads
@@ -593,7 +593,7 @@ def chip_rasters_to_zarr(
         )
         with progress:
             task = progress.add_task(f"Chipping stride={stride}", total=n_rows)
-            with ThreadPoolExecutor(max_workers=min(8, n_files)) as executor:
+            with ThreadPoolExecutor(max_workers=min(16, n_files)) as executor:
 
                 def _submit_strip(row: int) -> list:
                     y_px = row * stride
