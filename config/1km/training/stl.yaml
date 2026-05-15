@@ -1,0 +1,9 @@
+# @package _global_
+
+defaults:
+  - /training: default
+  - override /models: stl
+  - _self_
+
+train:
+  run_name: stl
