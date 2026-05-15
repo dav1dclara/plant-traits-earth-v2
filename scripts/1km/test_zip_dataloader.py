@@ -15,7 +15,9 @@ def main():
     parser.add_argument(
         "--chips-dir",
         type=Path,
-        default=Path("data/1km/chips/patch128_stride64"),
+        default=Path(
+            "/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64"
+        ),
     )
     parser.add_argument("--n-batches", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=4)

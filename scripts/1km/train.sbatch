@@ -9,7 +9,7 @@
 
 # Load modules and activate venv
 module restore plant-traits
-source /cluster/home/dclara/venvs/plant-traits/bin/activate
+source ~/venvs/plant-traits/bin/activate
 
 CHIPS_SRC=/cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64
 
@@ -27,6 +27,6 @@ for SPLIT in train val test; do
 done
 
 # Run training
-cd /cluster/home/dclara/plant-traits-earth-v2
+cd ~/plant-traits-earth-v2
 python scripts/1km/train.py \
     data.root_dir=$TMPDIR/
