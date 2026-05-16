@@ -31,7 +31,7 @@ data:
     bands: [mean]
 
 data_loaders:
-  batch_size: 4
+  batch_size: 16
   num_workers: 4
   train_fraction: 1.0
   val_fraction: 1.0
