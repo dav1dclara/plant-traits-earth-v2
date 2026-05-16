@@ -194,7 +194,6 @@ def get_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        persistent_workers=num_workers > 0,
     )
 
     return dataloader

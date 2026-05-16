@@ -23,4 +23,5 @@ echo "Done. $(du -sh $CHIPS_DIR)"
 cd ~/plant-traits-earth-v2
 python scripts/1km/train.py \
     +data.zarr_dir=$CHIPS_DIR \
-    data_loaders.num_workers=4
+    data_loaders.num_workers=4 \
+    train.use_tqdm=true

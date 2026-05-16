@@ -11,6 +11,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 from rich.progress import track
+from tqdm import tqdm as _tqdm
 from torch.utils.data import DataLoader
 
 from ptev2.data.dataloader import get_dataloader
@@ -32,6 +33,12 @@ from ptev2.utils import (
 )
 
 console = Console()
+
+
+def _progress(iterable, description: str, use_tqdm: bool):
+    if use_tqdm:
+        return _tqdm(iterable, desc=description, unit="batch")
+    return track(iterable, description=description)
 
 
 def _resolve_selection_value(
@@ -144,9 +151,9 @@ def main(cfg: DictConfig) -> None:
         raise FileNotFoundError(f"Zarr directory does not exist: {zarr_dir}")
     console.print(f"Zarr directory: [cyan]{zarr_dir}[/cyan]")
 
-    from ptev2.data.dataloader import _open_zarr, _resolve_zarr_path
+    from ptev2.data.dataloader import _open_zarr, _resolve_store_path
 
-    train_store = _open_zarr(_resolve_zarr_path(zarr_dir, "train"))
+    train_store = _open_zarr(_resolve_store_path(zarr_dir, "train"))
 
     predictors = [
         name
@@ -337,7 +344,7 @@ def main(cfg: DictConfig) -> None:
         train_gbif_num = train_gbif_den = 0.0
         logged_train_supervision_shape = False
 
-        for X, bundle in track(train_loader, description="Training"):
+        for X, bundle in _progress(train_loader, "Training", cfg.train.get("use_tqdm", False)):
             y_pred, _, bundle = _prepare_supervised_batch(
                 model=model,
                 X=X,
@@ -438,7 +445,7 @@ def main(cfg: DictConfig) -> None:
         logged_val_supervision_shape = False
 
         with torch.no_grad():
-            for X, bundle in track(val_loader, description="Validation"):
+            for X, bundle in _progress(val_loader, "Validation", cfg.train.get("use_tqdm", False)):
                 y_pred, _, bundle = _prepare_supervised_batch(
                     model=model,
                     X=X,
