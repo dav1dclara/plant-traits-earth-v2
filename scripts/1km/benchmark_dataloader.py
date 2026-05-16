@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import gc
 import time
 from pathlib import Path
 
@@ -72,19 +73,25 @@ def benchmark_split(
         return_target_bundle=True,
     )
     loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
     )
 
     limit = min(max_batches, len(loader)) if max_batches else len(loader)
     desc = f"{store_path.suffix.lstrip('.')}:{store_path.stem}"
     x_shape = None
+    loader_iter = iter(loader)
     t0 = time.perf_counter()
-    for i, (X, _bundle) in enumerate(tqdm(loader, desc=desc, total=limit, unit="batch")):
+    for i in tqdm(range(limit), desc=desc, total=limit, unit="batch"):
+        X, _bundle = next(loader_iter)
         if i == 0:
             x_shape = tuple(X.shape)
-        if i + 1 >= limit:
-            break
     elapsed = time.perf_counter() - t0
+    del loader_iter  # signal workers to stop outside the timed block
+    del loader
+    gc.collect()  # ensure worker processes are reaped immediately
 
     return {
         "n_chips": limit * batch_size,
@@ -111,16 +118,23 @@ def main() -> None:
     )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--max-batches", type=int, default=100,
-                        help="Stop after this many batches per split (0 = full epoch).")
+    parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=100,
+        help="Stop after this many batches per split (0 = full epoch).",
+    )
     parser.add_argument(
         "--backend",
         choices=["auto", "h5", "zarr"],
         default="auto",
         help="Storage backend. 'auto' prefers .h5 over .zarr.zip over .zarr.",
     )
-    parser.add_argument("--compare", action="store_true",
-                        help="Run both h5 and zarr backends and print a side-by-side comparison.")
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Run both h5 and zarr backends and print a side-by-side comparison.",
+    )
     args = parser.parse_args()
     args.max_batches = args.max_batches or None
 
@@ -144,12 +158,18 @@ def main() -> None:
                 continue
 
             r = benchmark_split(
-                store_path, predictors, target_layouts,
-                args.batch_size, args.num_workers, max_b,
+                store_path,
+                predictors,
+                target_layouts,
+                args.batch_size,
+                args.num_workers,
+                max_b,
             )
             all_results[backend][split] = r
 
-    print(f"\n{'backend':<8} {'split':<8} {'batches':>8} {'total(s)':>10} {'s/batch':>9} {'chips/s':>9}")
+    print(
+        f"\n{'backend':<8} {'split':<8} {'batches':>8} {'total(s)':>10} {'s/batch':>9} {'chips/s':>9}"
+    )
     print("-" * 58)
     for backend, splits in all_results.items():
         for split, r in splits.items():
@@ -158,11 +178,18 @@ def main() -> None:
                 f"{r['elapsed_s']:>10.1f} {r['s_per_batch']:>9.3f} {r['chips_per_s']:>9.0f}"
             )
 
-    if args.compare and len(all_results.get("h5", {})) and len(all_results.get("zarr", {})):
+    if (
+        args.compare
+        and len(all_results.get("h5", {}))
+        and len(all_results.get("zarr", {}))
+    ):
         print("\n--- Speedup (h5 vs zarr) ---")
         for split in args.splits:
             if split in all_results["h5"] and split in all_results["zarr"]:
-                speedup = all_results["zarr"][split]["s_per_batch"] / all_results["h5"][split]["s_per_batch"]
+                speedup = (
+                    all_results["zarr"][split]["s_per_batch"]
+                    / all_results["h5"][split]["s_per_batch"]
+                )
                 print(f"  {split}: {speedup:.1f}x faster with h5")
 
 
