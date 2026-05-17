@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import h5py
 import hydra
 import numpy as np
 import torch
@@ -11,8 +12,8 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 from rich.progress import track
-from tqdm import tqdm as _tqdm
 from torch.utils.data import DataLoader
+from tqdm import tqdm as _tqdm
 
 from ptev2.data.dataloader import get_dataloader
 from ptev2.metrics.evaluation import summarize_single_trait_metrics
@@ -153,7 +154,12 @@ def main(cfg: DictConfig) -> None:
 
     from ptev2.data.dataloader import _open_zarr, _resolve_store_path
 
-    train_store = _open_zarr(_resolve_store_path(zarr_dir, "train"))
+    def _open_store(store_path: Path):
+        if str(store_path).endswith(".h5"):
+            return h5py.File(store_path, "r")
+        return _open_zarr(store_path)
+
+    train_store = _open_store(_resolve_store_path(zarr_dir, "train"))
 
     predictors = [
         name
@@ -344,7 +350,9 @@ def main(cfg: DictConfig) -> None:
         train_gbif_num = train_gbif_den = 0.0
         logged_train_supervision_shape = False
 
-        for X, bundle in _progress(train_loader, "Training", cfg.train.get("use_tqdm", False)):
+        for X, bundle in _progress(
+            train_loader, "Training", cfg.train.get("use_tqdm", False)
+        ):
             y_pred, _, bundle = _prepare_supervised_batch(
                 model=model,
                 X=X,
@@ -445,7 +453,9 @@ def main(cfg: DictConfig) -> None:
         logged_val_supervision_shape = False
 
         with torch.no_grad():
-            for X, bundle in _progress(val_loader, "Validation", cfg.train.get("use_tqdm", False)):
+            for X, bundle in _progress(
+                val_loader, "Validation", cfg.train.get("use_tqdm", False)
+            ):
                 y_pred, _, bundle = _prepare_supervised_batch(
                     model=model,
                     X=X,

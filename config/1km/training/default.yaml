@@ -31,7 +31,7 @@ data:
     bands: [mean]
 
 data_loaders:
-  batch_size: 16
+  batch_size: 24
   num_workers: 4
   train_fraction: 1.0
   val_fraction: 1.0
@@ -56,13 +56,13 @@ train:
     gbif_weight: 0.2
 
   scheduler:
-    _target_: torch.optim.lr_scheduler.StepLR
-    step_size: 8
-    gamma: 0.8
+    _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+    T_max: 50
+    eta_min: 1e-6
 
   supervision:
-    mode: dense
-    center_crop_size: 1
+    mode: center_crop
+    center_crop_size: 32
 
   predictor_validity:
     mode: min_fraction
@@ -80,7 +80,7 @@ train:
 
   early_stopping:
     enabled: true
-    patience: 8
+    patience: 5
     min_delta: 0.0
 
 mmoe:
