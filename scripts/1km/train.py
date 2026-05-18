@@ -489,15 +489,22 @@ def main(cfg: DictConfig) -> None:
                     val_gbif_num += a_num.item()
                     val_gbif_den += a_den.item()
 
+                # Crop to center pixel before accumulating to keep memory bounded.
+                H, W = y_pred.shape[-2:]
+                cy, cx = H // 2, W // 2
+
+                def _cp(t: torch.Tensor) -> torch.Tensor:
+                    return t[..., cy : cy + 1, cx : cx + 1]
+
                 valid_splot = (
                     torch.isfinite(p_payload["y"])
                     & torch.isfinite(y_pred)
                     & (p_payload["source_mask"] > 0)
                 )
                 if bool(valid_splot.any()):
-                    val_y_true_parts.append(p_payload["y"].detach().cpu())
-                    val_y_pred_parts.append(y_pred.detach().cpu())
-                    val_valid_parts.append(valid_splot.detach().cpu())
+                    val_y_true_parts.append(_cp(p_payload["y"]).detach().cpu())
+                    val_y_pred_parts.append(_cp(y_pred).detach().cpu())
+                    val_valid_parts.append(_cp(valid_splot).detach().cpu())
 
                 if a_payload is not None:
                     valid_gbif = (
@@ -506,9 +513,9 @@ def main(cfg: DictConfig) -> None:
                         & (a_payload["source_mask"] > 0)
                     )
                     if bool(valid_gbif.any()):
-                        val_gbif_true_parts.append(a_payload["y"].detach().cpu())
-                        val_gbif_pred_parts.append(y_pred.detach().cpu())
-                        val_gbif_valid_parts.append(valid_gbif.detach().cpu())
+                        val_gbif_true_parts.append(_cp(a_payload["y"]).detach().cpu())
+                        val_gbif_pred_parts.append(_cp(y_pred).detach().cpu())
+                        val_gbif_valid_parts.append(_cp(valid_gbif).detach().cpu())
 
         val_splot_loss = (
             val_splot_num / val_splot_den if val_splot_den > 0 else float("nan")

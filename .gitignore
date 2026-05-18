@@ -40,3 +40,5 @@ scripts/Checkpoints_Scores
 scripts/__temp_dev
 
 logs/
+
+scripts/1km/euler/
