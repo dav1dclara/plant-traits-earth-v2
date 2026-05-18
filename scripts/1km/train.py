@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm as _tqdm
 
 from ptev2.data.dataloader import get_dataloader
-from ptev2.metrics.evaluation import summarize_single_trait_metrics
+from ptev2.metrics.core import mae, pearson_r, r2_score, rmse
 from ptev2.utils import (
     apply_supervision_bundle,
     apply_supervision_tensor,
@@ -73,6 +73,106 @@ def _is_better(current: float, best: float, mode: str, min_delta: float) -> bool
     if mode == "min":
         return current < (best - min_delta)
     raise ValueError("train.selection.mode must be 'max' or 'min'.")
+
+
+def _finite_mean(values: list[float]) -> float:
+    finite = np.asarray([value for value in values if np.isfinite(value)], dtype=float)
+    return float(np.mean(finite)) if finite.size else float("nan")
+
+
+def _nrmse_from_valid_values(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    if y_true.size == 0:
+        return float("nan")
+    value_range = float(np.max(y_true) - np.min(y_true))
+    if not np.isfinite(value_range) or value_range <= 0.0:
+        return float("nan")
+    return float(rmse(y_true, y_pred) / value_range)
+
+
+def _summarize_valid_trait_parts(
+    *,
+    y_true_parts: list[list[np.ndarray]],
+    y_pred_parts: list[list[np.ndarray]],
+    trait_names: list[str],
+) -> dict[str, Any] | None:
+    """Summarize metrics from already-filtered valid values, without dense tensor buffering."""
+    trait_metrics: dict[str, dict[str, float]] = {}
+    global_true_parts: list[np.ndarray] = []
+    global_pred_parts: list[np.ndarray] = []
+
+    for trait_idx, trait_name in enumerate(trait_names):
+        if y_true_parts[trait_idx]:
+            yt = np.concatenate(y_true_parts[trait_idx])
+            yp = np.concatenate(y_pred_parts[trait_idx])
+            global_true_parts.append(yt)
+            global_pred_parts.append(yp)
+            trait_metrics[str(trait_name)] = {
+                "n_valid": int(yt.size),
+                "rmse": float(rmse(yt, yp)),
+                "nrmse": _nrmse_from_valid_values(yt, yp),
+                "r2": float(r2_score(yt, yp)),
+                "pearson_r": float(pearson_r(yt, yp)),
+                "mae": float(mae(yt, yp)),
+            }
+        else:
+            trait_metrics[str(trait_name)] = {
+                "n_valid": 0,
+                "rmse": float("nan"),
+                "nrmse": float("nan"),
+                "r2": float("nan"),
+                "pearson_r": float("nan"),
+                "mae": float("nan"),
+            }
+
+    if not global_true_parts:
+        return None
+
+    global_y_true = np.concatenate(global_true_parts)
+    global_y_pred = np.concatenate(global_pred_parts)
+    return {
+        "rmse": float(rmse(global_y_true, global_y_pred)),
+        "nrmse": _nrmse_from_valid_values(global_y_true, global_y_pred),
+        "r2": float(r2_score(global_y_true, global_y_pred)),
+        "pearson_r": float(pearson_r(global_y_true, global_y_pred)),
+        "mae": float(mae(global_y_true, global_y_pred)),
+        "n_valid": int(global_y_true.size),
+        "macro_rmse": _finite_mean(
+            [values["rmse"] for values in trait_metrics.values()]
+        ),
+        "macro_nrmse": _finite_mean(
+            [values["nrmse"] for values in trait_metrics.values()]
+        ),
+        "macro_r2": _finite_mean(
+            [values["r2"] for values in trait_metrics.values()]
+        ),
+        "macro_pearson_r": _finite_mean(
+            [values["pearson_r"] for values in trait_metrics.values()]
+        ),
+        "macro_mae": _finite_mean(
+            [values["mae"] for values in trait_metrics.values()]
+        ),
+        "trait_metrics": trait_metrics,
+    }
+
+
+def _append_valid_trait_values(
+    *,
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    valid_mask: torch.Tensor,
+    y_true_parts: list[list[np.ndarray]],
+    y_pred_parts: list[list[np.ndarray]],
+) -> None:
+    """Store only valid scalar pairs per trait, avoiding dense validation buffers."""
+    for trait_idx in range(y_true.shape[1]):
+        trait_valid = valid_mask[:, trait_idx]
+        if bool(trait_valid.any()):
+            y_true_parts[trait_idx].append(
+                y_true[:, trait_idx][trait_valid].detach().cpu().numpy()
+            )
+            y_pred_parts[trait_idx].append(
+                y_pred[:, trait_idx][trait_valid].detach().cpu().numpy()
+            )
 
 
 def _prepare_supervised_batch(
@@ -444,12 +544,10 @@ def main(cfg: DictConfig) -> None:
         model.eval()
         val_splot_num = val_splot_den = 0.0
         val_gbif_num = val_gbif_den = 0.0
-        val_y_true_parts = []
-        val_y_pred_parts = []
-        val_valid_parts = []
-        val_gbif_true_parts = []
-        val_gbif_pred_parts = []
-        val_gbif_valid_parts = []
+        val_y_true_parts: list[list[np.ndarray]] = [[] for _ in traits]
+        val_y_pred_parts: list[list[np.ndarray]] = [[] for _ in traits]
+        val_gbif_true_parts: list[list[np.ndarray]] = [[] for _ in traits]
+        val_gbif_pred_parts: list[list[np.ndarray]] = [[] for _ in traits]
         logged_val_supervision_shape = False
 
         with torch.no_grad():
@@ -499,22 +597,19 @@ def main(cfg: DictConfig) -> None:
                     val_gbif_num += a_num.item()
                     val_gbif_den += a_den.item()
 
-                # Crop to center pixel before accumulating to keep memory bounded.
-                H, W = y_pred.shape[-2:]
-                cy, cx = H // 2, W // 2
-
-                def _cp(t: torch.Tensor) -> torch.Tensor:
-                    return t[..., cy : cy + 1, cx : cx + 1]
-
                 valid_splot = (
                     torch.isfinite(p_payload["y"])
                     & torch.isfinite(y_pred)
                     & (p_payload["source_mask"] > 0)
                 )
                 if bool(valid_splot.any()):
-                    val_y_true_parts.append(_cp(p_payload["y"]).detach().cpu())
-                    val_y_pred_parts.append(_cp(y_pred).detach().cpu())
-                    val_valid_parts.append(_cp(valid_splot).detach().cpu())
+                    _append_valid_trait_values(
+                        y_true=p_payload["y"],
+                        y_pred=y_pred,
+                        valid_mask=valid_splot,
+                        y_true_parts=val_y_true_parts,
+                        y_pred_parts=val_y_pred_parts,
+                    )
 
                 if a_payload is not None:
                     valid_gbif = (
@@ -523,9 +618,13 @@ def main(cfg: DictConfig) -> None:
                         & (a_payload["source_mask"] > 0)
                     )
                     if bool(valid_gbif.any()):
-                        val_gbif_true_parts.append(_cp(a_payload["y"]).detach().cpu())
-                        val_gbif_pred_parts.append(_cp(y_pred).detach().cpu())
-                        val_gbif_valid_parts.append(_cp(valid_gbif).detach().cpu())
+                        _append_valid_trait_values(
+                            y_true=a_payload["y"],
+                            y_pred=y_pred,
+                            valid_mask=valid_gbif,
+                            y_true_parts=val_gbif_true_parts,
+                            y_pred_parts=val_gbif_pred_parts,
+                        )
 
         val_splot_loss = (
             val_splot_num / val_splot_den if val_splot_den > 0 else float("nan")
@@ -536,14 +635,11 @@ def main(cfg: DictConfig) -> None:
 
         val_summary = None
         val_support_summary = None
-        if val_y_true_parts:
-            val_summary = summarize_single_trait_metrics(
-                y_true=torch.cat(val_y_true_parts, dim=0),
-                y_pred=torch.cat(val_y_pred_parts, dim=0),
-                source_mask=None,
-                valid_mask=torch.cat(val_valid_parts, dim=0),
+        if any(val_y_true_parts):
+            val_summary = _summarize_valid_trait_parts(
+                y_true_parts=val_y_true_parts,
+                y_pred_parts=val_y_pred_parts,
                 trait_names=traits,
-                n_bands=len(bands),
             )
             trait_n_valid = np.asarray(
                 [
@@ -564,14 +660,11 @@ def main(cfg: DictConfig) -> None:
             }
 
         val_gbif_summary = None
-        if val_gbif_true_parts:
-            val_gbif_summary = summarize_single_trait_metrics(
-                y_true=torch.cat(val_gbif_true_parts, dim=0),
-                y_pred=torch.cat(val_gbif_pred_parts, dim=0),
-                source_mask=None,
-                valid_mask=torch.cat(val_gbif_valid_parts, dim=0),
+        if any(val_gbif_true_parts):
+            val_gbif_summary = _summarize_valid_trait_parts(
+                y_true_parts=val_gbif_true_parts,
+                y_pred_parts=val_gbif_pred_parts,
                 trait_names=traits,
-                n_bands=len(bands),
             )
 
         selection_value = _resolve_selection_value(

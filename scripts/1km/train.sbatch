@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=plant-traits-1km-simple
-#SBATCH --output=/cluster/home/dclara/plant-traits-earth-v2/logs/%x_%j.log
+#SBATCH --output=/cluster/home/ldominiak/plant-traits-earth-v2/logs/%x_%j.log
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem-per-cpu=6G
@@ -24,4 +24,5 @@ echo "Done. $(du -sh $CHIPS_DIR)"
 cd ~/plant-traits-earth-v2
 python scripts/1km/train.py \
     +data.zarr_dir=$CHIPS_DIR \
-    train.use_tqdm=true
+    train.use_tqdm=true \
+    "$@"

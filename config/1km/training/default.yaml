@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /models: mlp
+  - /models: stl
   - _self_
 
 data:
@@ -61,7 +61,7 @@ train:
     eta_min: 1e-6
 
   supervision:
-    mode: center_crop
+    mode: dense
     center_crop_size: 32
 
   predictor_validity:
@@ -80,7 +80,7 @@ train:
 
   early_stopping:
     enabled: true
-    patience: 5
+    patience: 10
     min_delta: 0.0
 
   use_tqdm: false
