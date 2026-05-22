@@ -266,6 +266,9 @@ def main():
                 )
 
     elif args.region == "global":
+        import sys
+
+        from rich.console import Console
         from rich.progress import (
             BarColumn,
             MofNCompleteColumn,
@@ -274,6 +277,9 @@ def main():
             TimeElapsedColumn,
             TimeRemainingColumn,
         )
+
+        # Capture the real stderr now, before any worker thread can swap it.
+        progress_console = Console(file=sys.stderr)
 
         out_dir = (
             args.output or Path("data/1km/predictors_new/embeddings")
@@ -310,10 +316,10 @@ def main():
             lat_n = min(90, lat_s + grid)
             lon_e = min(180, lon_w + grid)
             name = tile_name(args.year, lat_s, lon_w)
-            with (
-                contextlib.redirect_stdout(io.StringIO()),
-                contextlib.redirect_stderr(io.StringIO()),
-            ):
+            # Only redirect stdout (geemap's error print). Do NOT redirect stderr —
+            # contextlib.redirect_stderr is not thread-safe and would swap the
+            # global sys.stderr that Rich's Progress refresh thread writes to.
+            with contextlib.redirect_stdout(io.StringIO()):
                 download_tile(embeddings, lon_w, lat_s, lon_e, lat_n, out_dir / name)
 
         progress = Progress(
@@ -324,6 +330,7 @@ def main():
             TimeElapsedColumn(),
             TextColumn("•"),
             TimeRemainingColumn(),
+            console=progress_console,
         )
         with progress:
             task = progress.add_task("Downloading tiles", total=len(pending))
@@ -381,10 +388,7 @@ def main():
             lat_n = min(lat_max, lat_s + grid)
             lon_e = min(lon_max, lon_w + grid)
             name = tile_name(args.year, lat_s, lon_w)
-            with (
-                contextlib.redirect_stdout(io.StringIO()),
-                contextlib.redirect_stderr(io.StringIO()),
-            ):
+            with contextlib.redirect_stdout(io.StringIO()):
                 download_tile(embeddings, lon_w, lat_s, lon_e, lat_n, tile_dir / name)
 
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
