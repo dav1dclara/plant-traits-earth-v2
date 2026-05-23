@@ -19,3 +19,5 @@ antimeridian
 rich
 earthengine-api
 geemap
+rio-tiler
+pmtiles

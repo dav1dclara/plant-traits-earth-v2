@@ -1,0 +1,78 @@
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+  background: #24262b;
+}
+
+/* Trait selector */
+.trait-select {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  max-width: 260px;
+  padding: 6px 10px;
+  font: 13px/1.2 ui-sans-serif, system-ui, sans-serif;
+  color: #d2d8df;
+  background: rgba(30, 33, 38, 0.9);
+  border: 1px solid #15171a;
+  border-radius: 6px;
+  cursor: pointer;
+  color-scheme: dark; /* dark native dropdown list */
+}
+.trait-select:focus {
+  outline: none;
+}
+
+/* Debug: live zoom readout (remove later) */
+.zoom-readout {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  z-index: 1;
+  padding: 4px 8px;
+  font: 12px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  color: #d2d8df;
+  background: rgba(30, 33, 38, 0.9);
+  border-radius: 6px;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Dark theme for MapLibre controls */
+.maplibregl-ctrl-group {
+  background: #2b2e33;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+.maplibregl-ctrl-group button + button {
+  border-top: 1px solid #15171a;
+}
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: invert(1);
+}
+.maplibregl-ctrl-attrib,
+.maplibregl-ctrl-attrib.maplibregl-compact {
+  background-color: rgba(30, 33, 38, 0.9) !important;
+  color: #b9c0c9 !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: #d2d8df !important;
+}
+/* the (i) toggle + its icon */
+.maplibregl-ctrl-attrib-button {
+  background-color: transparent;
+  filter: invert(0.9);
+}
+.maplibregl-ctrl-attrib-button:focus {
+  box-shadow: none;
+}
+.maplibregl-ctrl-attrib.maplibregl-compact::after {
+  filter: invert(0.9);
+}

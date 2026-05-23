@@ -1,0 +1,11 @@
+node_modules
+dist
+.wrangler
+.env
+.env.local
+*.local
+
+# local tiling artifacts
+*.mbtiles
+*.pmtiles
+dem_*.tif

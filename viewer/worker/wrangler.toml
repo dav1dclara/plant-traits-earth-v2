@@ -1,0 +1,9 @@
+name = "ptev2-tiles"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Bind your existing (private) R2 bucket. The bucket itself stays private —
+# only this Worker can read it. Replace the name with your bucket's name.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "plant-traits-v2"
