@@ -22,7 +22,6 @@ const MIN_ZOOM = 2 // hard floor on zoom-out
 export default function App() {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
-  const [zoom, setZoom] = useState(null) // debug: live zoom readout (remove later)
   const [traitId, setTraitId] = useState('') // '' = none selected
 
   useEffect(() => {
@@ -38,40 +37,9 @@ export default function App() {
     })
     mapRef.current = map
 
-    setZoom(map.getZoom())
+    // Trackpad/wheel zoom can transiently overshoot minZoom; snap it back.
     map.on('zoom', () => {
-      // Trackpad/wheel zoom can transiently overshoot minZoom; snap it back.
-      if (map.getZoom() < MIN_ZOOM) {
-        map.setZoom(MIN_ZOOM)
-        return
-      }
-      setZoom(map.getZoom())
-    })
-
-    // Slowly spin the globe on first load, until the user drags or zooms.
-    const SPIN_DEG_PER_SEC = 4
-    const stopEvents = ['mousedown', 'touchstart', 'wheel']
-    let spinId = 0
-    let spinLast = 0
-    const spin = (t) => {
-      if (spinLast) {
-        const c = map.getCenter()
-        c.lng += (SPIN_DEG_PER_SEC * (t - spinLast)) / 1000
-        map.setCenter(c)
-      }
-      spinLast = t
-      spinId = requestAnimationFrame(spin)
-    }
-    const stopSpin = () => {
-      cancelAnimationFrame(spinId)
-      spinId = 0
-      const canvas = map.getCanvas()
-      stopEvents.forEach((ev) => canvas.removeEventListener(ev, stopSpin))
-    }
-    map.on('load', () => {
-      const canvas = map.getCanvas()
-      stopEvents.forEach((ev) => canvas.addEventListener(ev, stopSpin, { passive: true }))
-      spinId = requestAnimationFrame(spin)
+      if (map.getZoom() < MIN_ZOOM) map.setZoom(MIN_ZOOM)
     })
 
     map.on('style.load', () => {
@@ -134,7 +102,6 @@ export default function App() {
     })
 
     return () => {
-      stopSpin()
       map.remove()
       mapRef.current = null
     }
@@ -166,7 +133,6 @@ export default function App() {
         ))}
       </select>
       */}
-      {zoom != null && <div className="zoom-readout">z {zoom.toFixed(2)}</div>}
     </>
   )
 }

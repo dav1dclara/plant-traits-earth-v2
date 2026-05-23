@@ -31,21 +31,6 @@ body,
   outline: none;
 }
 
-/* Debug: live zoom readout (remove later) */
-.zoom-readout {
-  position: absolute;
-  bottom: 10px;
-  left: 10px;
-  z-index: 1;
-  padding: 4px 8px;
-  font: 12px/1 ui-monospace, "SF Mono", Menlo, monospace;
-  color: #d2d8df;
-  background: rgba(30, 33, 38, 0.9);
-  border-radius: 6px;
-  pointer-events: none;
-  user-select: none;
-}
-
 /* Dark theme for MapLibre controls */
 .maplibregl-ctrl-group {
   background: #2b2e33;
