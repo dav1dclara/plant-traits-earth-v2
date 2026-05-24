@@ -43,6 +43,117 @@ def _read_store_metadata(path: Path) -> tuple[int, dict]:
         return n_chips, attrs
 
 
+def _read_bounds(path: Path) -> np.ndarray:
+    """Read chip bounds without keeping an open store handle."""
+    if str(path).endswith(".h5"):
+        import h5py
+
+        with h5py.File(path, "r") as f:
+            return np.asarray(f["bounds"][:])
+
+    store = _open_zarr(path)
+    return np.asarray(store["bounds"][:])
+
+
+def _sample_random_indices(n_total: int, n_keep: int, subset_seed: int) -> np.ndarray:
+    rng = np.random.default_rng(int(subset_seed))
+    return np.sort(rng.choice(n_total, size=n_keep, replace=False))
+
+
+def _allocate_remaining_quota(
+    quotas: np.ndarray,
+    capacities: np.ndarray,
+    n_remaining: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if n_remaining <= 0:
+        return quotas
+
+    total_capacity = int(capacities.sum())
+    if total_capacity <= 0:
+        return quotas
+
+    expected = capacities * (n_remaining / total_capacity)
+    extra = np.floor(expected).astype(np.int64)
+    extra = np.minimum(extra, capacities)
+    quotas += extra
+    n_remaining -= int(extra.sum())
+
+    if n_remaining <= 0:
+        return quotas
+
+    remainders = expected - extra
+    candidates = np.flatnonzero((capacities - extra) > 0)
+    if candidates.size == 0:
+        return quotas
+
+    # Shuffle before stable sorting so equal remainders are resolved deterministically
+    # by subset_seed, not by cell id.
+    shuffled = rng.permutation(candidates)
+    order = shuffled[np.argsort(-remainders[shuffled], kind="stable")]
+    quotas[order[:n_remaining]] += 1
+    return quotas
+
+
+def _sample_spatial_grid_indices(
+    store_path: Path,
+    n_total: int,
+    n_keep: int,
+    subset_seed: int,
+    spatial_grid_size: int,
+) -> np.ndarray:
+    bounds = _read_bounds(store_path)
+    if bounds.shape[0] != n_total or bounds.shape[1] != 4:
+        raise ValueError(
+            f"Expected bounds with shape ({n_total}, 4), got {bounds.shape}."
+        )
+
+    centers_x = (bounds[:, 0] + bounds[:, 2]) / 2.0
+    centers_y = (bounds[:, 1] + bounds[:, 3]) / 2.0
+    valid = np.isfinite(centers_x) & np.isfinite(centers_y)
+    if not np.all(valid):
+        raise ValueError("Spatial subset sampling requires finite chip bounds.")
+
+    grid_size = int(spatial_grid_size)
+    if grid_size < 1:
+        raise ValueError(f"spatial_grid_size must be >= 1, got {grid_size}.")
+
+    x_edges = np.linspace(float(centers_x.min()), float(centers_x.max()), grid_size + 1)
+    y_edges = np.linspace(float(centers_y.min()), float(centers_y.max()), grid_size + 1)
+    x_bins = np.searchsorted(x_edges[1:-1], centers_x, side="right")
+    y_bins = np.searchsorted(y_edges[1:-1], centers_y, side="right")
+    cell_ids = y_bins * grid_size + x_bins
+
+    unique_cells, inverse, counts = np.unique(
+        cell_ids, return_inverse=True, return_counts=True
+    )
+    rng = np.random.default_rng(int(subset_seed))
+    quotas = np.zeros(unique_cells.shape[0], dtype=np.int64)
+
+    if n_keep >= unique_cells.shape[0]:
+        quotas[:] = 1
+        capacities = counts - quotas
+        quotas = _allocate_remaining_quota(
+            quotas=quotas,
+            capacities=capacities,
+            n_remaining=n_keep - int(quotas.sum()),
+            rng=rng,
+        )
+    else:
+        selected_cells = rng.choice(unique_cells.shape[0], size=n_keep, replace=False)
+        quotas[selected_cells] = 1
+
+    selected_indices = []
+    all_indices = np.arange(n_total, dtype=np.int64)
+    for cell_pos, quota in enumerate(quotas):
+        if quota <= 0:
+            continue
+        members = all_indices[inverse == cell_pos]
+        selected_indices.append(rng.choice(members, size=int(quota), replace=False))
+
+    return np.sort(np.concatenate(selected_indices).astype(np.int64))
+
+
 class PlantTraitDataset(Dataset):
     """PyTorch Dataset for spatially pre-extracted Earth Observation chips paired with plant trait observations.
 
@@ -151,6 +262,8 @@ def get_dataloader(
     return_target_bundle: bool = True,
     split_fraction: float = 1.0,
     subset_seed: int = 0,
+    subset_strategy: str = "random",
+    spatial_grid_size: int = 24,
 ) -> DataLoader:
     """Get a dataloader for a given split from a chip store (HDF5 or zarr).
 
@@ -175,8 +288,22 @@ def get_dataloader(
         raise ValueError(f"split_fraction must be in (0, 1], got {split_fraction}.")
     if split_fraction < 1.0:
         n_keep = max(1, int(round(n_total * split_fraction)))
-        rng = np.random.default_rng(int(subset_seed))
-        chip_indices = np.sort(rng.choice(n_total, size=n_keep, replace=False))
+        subset_strategy = str(subset_strategy)
+        if subset_strategy == "random":
+            chip_indices = _sample_random_indices(n_total, n_keep, subset_seed)
+        elif subset_strategy == "spatial_grid":
+            chip_indices = _sample_spatial_grid_indices(
+                store_path=store_path,
+                n_total=n_total,
+                n_keep=n_keep,
+                subset_seed=subset_seed,
+                spatial_grid_size=spatial_grid_size,
+            )
+        else:
+            raise ValueError(
+                "subset_strategy must be one of ['random', 'spatial_grid'], "
+                f"got '{subset_strategy}'."
+            )
     else:
         chip_indices = None
 

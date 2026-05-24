@@ -175,6 +175,55 @@ def _append_valid_trait_values(
             )
 
 
+def _apply_supervision_subsample(
+    payload: dict[str, torch.Tensor] | None,
+    *,
+    max_pixels_per_channel: int | None,
+) -> dict[str, torch.Tensor] | None:
+    """Cap valid supervision pixels per sample and target channel."""
+    if payload is None:
+        return None
+    if max_pixels_per_channel is None:
+        return payload
+    max_pixels = int(max_pixels_per_channel)
+    if max_pixels < 1:
+        raise ValueError(
+            "supervision_subsample max_pixels_per_channel must be >= 1, "
+            f"got {max_pixels}."
+        )
+
+    source_mask = payload["source_mask"]
+    valid = torch.isfinite(payload["y"]) & (source_mask > 0)
+    if not bool(valid.any()):
+        return payload
+
+    keep = torch.zeros_like(valid, dtype=torch.bool)
+    flat_valid = valid.flatten(start_dim=2)
+    flat_keep = keep.flatten(start_dim=2)
+    for sample_idx in range(flat_valid.shape[0]):
+        for channel_idx in range(flat_valid.shape[1]):
+            valid_idx = torch.nonzero(
+                flat_valid[sample_idx, channel_idx],
+                as_tuple=False,
+            ).flatten()
+            n_valid = int(valid_idx.numel())
+            if n_valid <= max_pixels:
+                chosen = valid_idx
+            else:
+                order = torch.randperm(n_valid, device=valid_idx.device)[:max_pixels]
+                chosen = valid_idx[order]
+            flat_keep[sample_idx, channel_idx, chosen] = True
+
+    payload = dict(payload)
+    payload["source_mask"] = torch.where(
+        keep,
+        source_mask,
+        torch.zeros_like(source_mask),
+    )
+    payload["y"] = torch.where(payload["source_mask"] > 0, payload["y"], torch.nan)
+    return payload
+
+
 def _prepare_supervised_batch(
     *,
     model: torch.nn.Module,
@@ -295,6 +344,20 @@ def main(cfg: DictConfig) -> None:
     subset_seed = int(
         OmegaConf.select(cfg, "data_loaders.subset_seed") or int(cfg.train.seed)
     )
+    subset_strategy = str(
+        OmegaConf.select(cfg, "data_loaders.subset_strategy") or "random"
+    )
+    spatial_grid_size = int(
+        OmegaConf.select(cfg, "data_loaders.spatial_grid_size") or 24
+    )
+    if train_fraction < 1.0 or val_fraction < 1.0:
+        console.print(
+            "Using deterministic data subset: "
+            f"train_fraction=[cyan]{train_fraction:g}[/cyan], "
+            f"val_fraction=[cyan]{val_fraction:g}[/cyan], "
+            f"subset_seed=[cyan]{subset_seed}[/cyan], "
+            f"subset_strategy=[cyan]{subset_strategy}[/cyan]"
+        )
 
     dataloader_cfg = {
         "zarr_dir": zarr_dir,
@@ -304,6 +367,8 @@ def main(cfg: DictConfig) -> None:
         "batch_size": batch_size,
         "num_workers": num_workers,
         "subset_seed": subset_seed,
+        "subset_strategy": subset_strategy,
+        "spatial_grid_size": spatial_grid_size,
     }
 
     train_loader = get_dataloader(
@@ -442,6 +507,39 @@ def main(cfg: DictConfig) -> None:
     es_patience = int(cfg.train.early_stopping.patience)
     es_min_delta = float(cfg.train.early_stopping.min_delta)
 
+    subsample_enabled = bool(
+        OmegaConf.select(cfg, "train.supervision_subsample.enabled") or False
+    )
+    splot_max_pixels = OmegaConf.select(
+        cfg, "train.supervision_subsample.splot_max_pixels_per_channel"
+    )
+    gbif_max_pixels = OmegaConf.select(
+        cfg, "train.supervision_subsample.gbif_max_pixels_per_channel"
+    )
+    splot_max_pixels = None if splot_max_pixels is None else int(splot_max_pixels)
+    gbif_max_pixels = None if gbif_max_pixels is None else int(gbif_max_pixels)
+    if subsample_enabled:
+        if splot_max_pixels is None and gbif_max_pixels is None:
+            raise ValueError(
+                "train.supervision_subsample.enabled=true requires at least one "
+                "max_pixels_per_channel setting."
+            )
+        if splot_max_pixels is not None and splot_max_pixels < 1:
+            raise ValueError(
+                "train.supervision_subsample.splot_max_pixels_per_channel must be "
+                f">= 1, got {splot_max_pixels}."
+            )
+        if gbif_max_pixels is not None and gbif_max_pixels < 1:
+            raise ValueError(
+                "train.supervision_subsample.gbif_max_pixels_per_channel must be "
+                f">= 1, got {gbif_max_pixels}."
+            )
+        console.print(
+            "Supervision subsampling: "
+            f"sPlot max_pixels_per_channel=[cyan]{splot_max_pixels}[/cyan], "
+            f"GBIF max_pixels_per_channel=[cyan]{gbif_max_pixels}[/cyan]"
+        )
+
     for epoch in range(int(cfg.train.epochs)):
         console.rule(f"Epoch {epoch + 1}/{cfg.train.epochs}")
 
@@ -475,6 +573,13 @@ def main(cfg: DictConfig) -> None:
             a_payload = bundle.get(aux_ds)
             if p_payload is None:
                 raise ValueError("Missing primary dataset payload.")
+            if subsample_enabled:
+                p_payload = _apply_supervision_subsample(
+                    p_payload, max_pixels_per_channel=splot_max_pixels
+                )
+                a_payload = _apply_supervision_subsample(
+                    a_payload, max_pixels_per_channel=gbif_max_pixels
+                )
             if not logged_train_supervision_shape:
                 console.print(
                     "Training supervised shapes: "

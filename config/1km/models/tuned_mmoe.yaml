@@ -1,0 +1,17 @@
+# Trait-grouped Gated MMoE V3 with hard-trait bypass.
+_target_: ptev2.models.tuned_mmoe.GatedMMoEModelV3
+
+# Hard-trait bypass: X223, X282, X289, X297 in the canonical 37-trait order.
+hard_trait_indices: [11, 17, 18, 19]
+
+n_experts: 8
+expert_hidden: 64
+base_channels: 32
+norm: gn
+gn_groups: 8
+stride_blocks: [1, 1, 1, 1]
+gate_temperature: 0.8
+gate_top_k: 2
+residual_scale: 0.0
+dropout_p: 0.1
+memory_efficient: true

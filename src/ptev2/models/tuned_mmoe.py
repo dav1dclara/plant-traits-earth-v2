@@ -299,10 +299,12 @@ class GatedMMoEModelV3(nn.Module):
         gate_top_k: int | None = 2,
         residual_scale: float = 0.0,
         hard_trait_indices: tuple[int, ...] = _DEFAULT_HARD_INDICES,
+        memory_efficient: bool = True,
     ) -> None:
         super().__init__()
         self.residual_scale = float(residual_scale)
         self._out_channels = out_channels
+        self.memory_efficient = bool(memory_efficient)
 
         hard_set = set(hard_trait_indices)
         self.hard_indices: list[int] = sorted(hard_set)
@@ -364,14 +366,30 @@ class GatedMMoEModelV3(nn.Module):
         z = self.encoder(x)
 
         route = self.route_pool(z).flatten(1)
-        task_maps, gate_w = self.mmoe(z, route)
+        if self.memory_efficient:
+            gate_logits = torch.stack([g(route) for g in self.mmoe.gates], dim=1)
+            gate_w = self.mmoe._gate_weights(gate_logits)
+            task_maps = None
+        else:
+            task_maps, gate_w = self.mmoe(z, route)
         self.last_gate_weights = gate_w.detach()
 
         shared = self.shared_proj(z) if self.shared_proj is not None else None
 
         soft_outs: list[torch.Tensor] = []
         for i, head in enumerate(self.soft_heads):
-            feat = task_maps[:, i]
+            if task_maps is None:
+                feat = None
+                for expert_idx, expert in enumerate(self.mmoe.experts):
+                    expert_feat = expert(z)
+                    weighted = (
+                        gate_w[:, i, expert_idx].view(-1, 1, 1, 1) * expert_feat
+                    )
+                    feat = weighted if feat is None else feat + weighted
+                if feat is None:
+                    raise RuntimeError("MMoE has no experts.")
+            else:
+                feat = task_maps[:, i]
             if shared is not None and self.residual_scale > 0.0:
                 feat = feat + self.residual_scale * shared
             soft_outs.append(head(feat))

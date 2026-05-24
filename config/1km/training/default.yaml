@@ -36,6 +36,8 @@ data_loaders:
   train_fraction: 1.0
   val_fraction: 1.0
   subset_seed: 0
+  subset_strategy: random
+  spatial_grid_size: 24
 
 train:
   seed: 0
@@ -63,6 +65,11 @@ train:
   supervision:
     mode: dense
     center_crop_size: 32
+
+  supervision_subsample:
+    enabled: false
+    splot_max_pixels_per_channel: null
+    gbif_max_pixels_per_channel: null
 
   predictor_validity:
     mode: min_fraction

@@ -1,0 +1,29 @@
+run_name: null
+checkpoint_path: null
+checkpoint_dir: /cluster/work/igp_psr/plant-traits-earth-v2/checkpoints/1km/
+zarr_dir: /cluster/work/igp_psr/plant-traits-earth-v2/data/1km/chips/patch128_stride64
+output_dir: /cluster/work/igp_psr/plant-traits-earth-v2/test_outputs/1km/
+prediction_out_dir: /cluster/work/igp_psr/plant-traits-earth-v2/predictions/1km/
+prediction_tif_name: null
+test_split: test
+eval_dataset: splot
+diagnostics_dir: /cluster/work/igp_psr/plant-traits-earth-v2/outputs/diagnostics/1km
+write_all_map: true
+write_per_trait_csv: false
+wandb_run_name: null
+wandb_group: test
+test_batch_size: 4
+test_num_workers: 2
+prediction_batch_size: 2
+overwrite: false
+keep_temp: false
+final_block_size: 512
+
+# Denormalization stability controls (z-space -> raw units)
+denormalization:
+  clip_z_abs: 3.0
+  clip_to_inverse_domain: true
+  domain_eps: 1.0e-6
+  domain_margin_ratio: 0.1
+  domain_margin_abs: 1.0e-3
+  max_abs_output: null

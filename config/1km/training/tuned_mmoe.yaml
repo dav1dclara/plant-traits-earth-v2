@@ -1,0 +1,12 @@
+# @package _global_
+
+defaults:
+  - /training: default
+  - override /models: tuned_mmoe
+  - _self_
+
+train:
+  run_name: tuned_mmoe
+
+data_loaders:
+  batch_size: 4
