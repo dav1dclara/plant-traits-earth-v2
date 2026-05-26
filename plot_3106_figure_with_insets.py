@@ -21,15 +21,16 @@ from rasterio.warp import reproject, transform_bounds
 from rasterio.windows import Window, from_bounds
 from scipy import ndimage
 
-BACKGROUND_COLOR = "#1a1a18"
+BACKGROUND_COLOR = "none"  # fully transparent
 
 plt.rcParams["font.family"] = "monospace"
 plt.rcParams["pdf.compression"] = 9
-plt.rcParams["figure.facecolor"] = BACKGROUND_COLOR
-plt.rcParams["figure.edgecolor"] = BACKGROUND_COLOR
-plt.rcParams["axes.facecolor"] = BACKGROUND_COLOR
-plt.rcParams["savefig.facecolor"] = BACKGROUND_COLOR
-plt.rcParams["savefig.edgecolor"] = BACKGROUND_COLOR
+plt.rcParams["figure.facecolor"] = "none"
+plt.rcParams["figure.edgecolor"] = "none"
+plt.rcParams["axes.facecolor"] = "none"
+plt.rcParams["savefig.facecolor"] = "none"
+plt.rcParams["savefig.edgecolor"] = "none"
+plt.rcParams["savefig.transparent"] = True
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SOURCE_DIR = PROJECT_ROOT / "data" / "1km" / "predictions" / "float16"
@@ -113,7 +114,7 @@ plant_height_cmap = LinearSegmentedColormap.from_list(
     ],
     N=256,
 )
-plant_height_cmap.set_bad(TRANSPARENT)
+plant_height_cmap.set_bad((0, 0, 0, 0))  # NaN = fully transparent
 
 
 def scaled_transform(transform, src_width, src_height, out_width, out_height):
@@ -364,7 +365,7 @@ def add_scalebar(ax, extent, color=LINE_COLOR):
         fontweight="normal",
         ha="left",
         va="bottom",
-        bbox=dict(facecolor=BACKGROUND_COLOR, edgecolor="none", alpha=1.0, pad=0.8),
+        bbox=dict(facecolor="none", edgecolor="none", alpha=0.0, pad=0.8),
         zorder=10,
     )
 
@@ -390,7 +391,7 @@ def style_inset_axis(ax, name):
         fontweight="normal",
         fontfamily="sans-serif",
         path_effects=[pe.withStroke(linewidth=1.2, foreground=BACKGROUND_COLOR)],
-        bbox=dict(facecolor=BACKGROUND_COLOR, edgecolor="none", alpha=1.0, pad=2.0),
+        bbox=dict(facecolor="none", edgecolor="none", alpha=0.0, pad=2.0),
         zorder=10,
     )
 
@@ -576,9 +577,9 @@ def main(batch_inpaint_others: bool = False):
     fig.savefig(
         OUTPUT_FIGURE,
         dpi=export_dpi,
-        transparent=False,
-        facecolor=BACKGROUND_COLOR,
-        edgecolor=BACKGROUND_COLOR,
+        transparent=True,
+        facecolor="none",
+        edgecolor="none",
         bbox_inches="tight",
         pad_inches=0.02,
     )
