@@ -2,7 +2,7 @@
 // PMTiles client can fetch byte ranges directly. The bucket is never public; all
 // access goes through this Worker (bound as BUCKET in wrangler.toml).
 //
-// GET https://<worker>.workers.dev/dem.pmtiles  ->  byte ranges of that object.
+// GET https://<worker>.workers.dev/predictions/4.pmtiles  ->  byte ranges of that object.
 
 const CORS = {
   "access-control-allow-origin": "*", // tighten to your viewer origin(s) if desired

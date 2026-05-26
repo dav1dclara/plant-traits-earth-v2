@@ -1,9 +1,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+import { cloudflare } from "@cloudflare/vite-plugin";
+
 // GitHub Project Pages serve at /<repo>/, so production assets need that base.
 // Dev server stays at / .
 export default defineConfig(({ command }) => ({
-  plugins: [react()],
+  plugins: [react(), cloudflare()],
   base: command === 'build' ? '/plant-traits-earth-v2/' : '/',
 }))

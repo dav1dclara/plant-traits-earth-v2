@@ -1,0 +1,162 @@
+{
+  "X4": {
+    "vmin": 0.3720703125,
+    "vmax": 0.62109375,
+    "colormap": "viridis"
+  },
+  "X6": {
+    "vmin": 0.281494140625,
+    "vmax": 1.7142578124999943,
+    "colormap": "viridis"
+  },
+  "X13": {
+    "vmin": 426.25,
+    "vmax": 487.5,
+    "colormap": "viridis"
+  },
+  "X14": {
+    "vmin": 14.590625000000001,
+    "vmax": 23.859375,
+    "colormap": "viridis"
+  },
+  "X15": {
+    "vmin": 1.0107421875,
+    "vmax": 1.953125,
+    "colormap": "viridis"
+  },
+  "X21": {
+    "vmin": 0.00957489013671875,
+    "vmax": 0.1195068359375,
+    "colormap": "viridis"
+  },
+  "X26": {
+    "vmin": 0.49658203125,
+    "vmax": 28.125,
+    "colormap": "viridis"
+  },
+  "X27": {
+    "vmin": 2.03125,
+    "vmax": 9.0390625,
+    "colormap": "viridis"
+  },
+  "X46": {
+    "vmin": 0.1851806640625,
+    "vmax": 0.364501953125,
+    "colormap": "viridis"
+  },
+  "X47": {
+    "vmin": 0.1033935546875,
+    "vmax": 0.11334228515625,
+    "colormap": "viridis"
+  },
+  "X50": {
+    "vmin": 1.1494140625,
+    "vmax": 2.5625,
+    "colormap": "viridis"
+  },
+  "X55": {
+    "vmin": 10.921875,
+    "vmax": 514.5,
+    "colormap": "viridis"
+  },
+  "X78": {
+    "vmin": -2.81640625,
+    "vmax": 3.158203125,
+    "colormap": "viridis"
+  },
+  "X95": {
+    "vmin": 80.0,
+    "vmax": 91.8125,
+    "colormap": "viridis"
+  },
+  "X138": {
+    "vmin": 71.625,
+    "vmax": 6467.199999999953,
+    "colormap": "viridis"
+  },
+  "X144": {
+    "vmin": 22.046875,
+    "vmax": 119.625,
+    "colormap": "viridis"
+  },
+  "X145": {
+    "vmin": 0.41640625000000003,
+    "vmax": 4.864843749999977,
+    "colormap": "viridis"
+  },
+  "X146": {
+    "vmin": 19.53125,
+    "vmax": 34.15625,
+    "colormap": "viridis"
+  },
+  "X163": {
+    "vmin": 0.053302001953125004,
+    "vmax": 1.1494140625,
+    "colormap": "viridis"
+  },
+  "X169": {
+    "vmin": 13.703125,
+    "vmax": 462.75,
+    "colormap": "viridis"
+  },
+  "X237": {
+    "vmin": 2.0078125,
+    "vmax": 7.671875,
+    "colormap": "viridis"
+  },
+  "X281": {
+    "vmin": 27.890625,
+    "vmax": 109.375,
+    "colormap": "viridis"
+  },
+  "X282": {
+    "vmin": 352.5,
+    "vmax": 684.0,
+    "colormap": "viridis"
+  },
+  "X289": {
+    "vmin": 844.0,
+    "vmax": 1476.0,
+    "colormap": "viridis"
+  },
+  "X297": {
+    "vmin": 7.015625,
+    "vmax": 11.8671875,
+    "colormap": "viridis"
+  },
+  "X614": {
+    "vmin": 1879.0,
+    "vmax": 5700.0,
+    "colormap": "viridis"
+  },
+  "X1080": {
+    "vmin": 867.5,
+    "vmax": 4380.0,
+    "colormap": "viridis"
+  },
+  "X3106": {
+    "vmin": 0.14436035156250002,
+    "vmax": 13.4921875,
+    "colormap": "viridis"
+  },
+  "X3112": {
+    "vmin": 138.125,
+    "vmax": 6164.0,
+    "colormap": "viridis"
+  },
+  "X3113": {
+    "vmin": 111.41250000000001,
+    "vmax": 4840.0,
+    "colormap": "viridis"
+  },
+  "X3117": {
+    "vmin": 7.11328125,
+    "vmax": 20.234375,
+    "colormap": "viridis"
+  },
+  "X3120": {
+    "vmin": 2.310546875,
+    "vmax": 4.13671875,
+    "colormap": "viridis"
+  }
+}

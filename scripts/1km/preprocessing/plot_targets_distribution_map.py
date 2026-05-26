@@ -22,9 +22,11 @@ from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 
 TRAIT = "X3106"
-TARGETS_DIR = Path("/scratch3/plant-traits-v2/data/1km/targets")
+TARGETS_DIR = Path(__file__).parents[3] / "data/1km/targets"
 OUT_PATH = (
-    Path(__file__).parents[3] / "viz/data/targets" / "targets_distribution_map.png"
+    Path(__file__).parents[3]
+    / "report/figures/data/targets"
+    / "targets_distribution_map.pdf"
 )
 
 DISPLAY_SHAPE = (900, 1800)  # (rows, cols) per panel
@@ -33,6 +35,10 @@ BAND = "count"
 CMAP = "viridis"
 
 plt.rcParams["font.family"] = "monospace"
+plt.rcParams["text.color"] = "white"
+plt.rcParams["axes.labelcolor"] = "white"
+plt.rcParams["xtick.color"] = "white"
+plt.rcParams["ytick.color"] = "white"
 
 
 def load_for_display(
@@ -87,7 +93,7 @@ for ax, data, bounds, title, cbar_label in [
     (axes[0], gbif_data, gbif_bounds, "GBIF", "Number of GBIF observations"),
     (axes[1], splot_data, splot_bounds, "sPlot", "Number of sPlot vegetation surveys"),
 ]:
-    ax.add_feature(cfeature.LAND, facecolor="#f0f0f0", edgecolor="none")
+    ax.add_feature(cfeature.LAND, facecolor="none", edgecolor="none")
     west, south, east, north = bounds
     im = ax.imshow(
         data,
@@ -98,13 +104,16 @@ for ax, data, bounds, title, cbar_label in [
         interpolation="none",
         norm=norm,
     )
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, edgecolor="#555555")
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, edgecolor="white")
     ax.set_global()
     ax.spines["geo"].set_linewidth(0.5)
+    ax.spines["geo"].set_edgecolor("white")
     cbar = fig.colorbar(
         im, ax=ax, orientation="horizontal", pad=0.04, shrink=0.4, aspect=50
     )
     cbar.set_label(cbar_label)
+    cbar.outline.set_edgecolor("white")
+    cbar.ax.tick_params(color="white")
 
 OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 fig.subplots_adjust(wspace=-0.2)
@@ -112,6 +121,6 @@ fig.savefig(
     OUT_PATH,
     dpi=300,
     bbox_inches="tight",
-    pil_kwargs={"compress_level": 9, "optimize": True},
+    transparent=True,
 )
 print(f"Saved {OUT_PATH}")
