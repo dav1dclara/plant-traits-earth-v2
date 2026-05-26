@@ -21,15 +21,22 @@ from rasterio.warp import reproject, transform_bounds
 from rasterio.windows import Window, from_bounds
 from scipy import ndimage
 
+BACKGROUND_COLOR = "#1a1a18"
+
 plt.rcParams["font.family"] = "monospace"
 plt.rcParams["pdf.compression"] = 9
+plt.rcParams["figure.facecolor"] = BACKGROUND_COLOR
+plt.rcParams["figure.edgecolor"] = BACKGROUND_COLOR
+plt.rcParams["axes.facecolor"] = BACKGROUND_COLOR
+plt.rcParams["savefig.facecolor"] = BACKGROUND_COLOR
+plt.rcParams["savefig.edgecolor"] = BACKGROUND_COLOR
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SOURCE_DIR = PROJECT_ROOT / "data" / "1km" / "predictions" / "float16"
 INPAINTED_DIR = PROJECT_ROOT / "data" / "1km" / "predictions" / "float16_inpainted"
 INPAINTED_DIR.mkdir(parents=True, exist_ok=True)
 
-TRAIT_ID = "3106"
+TRAIT_ID = "3112"
 TRAIT_FILENAME = f"{TRAIT_ID}.tif"
 TRAIT_SOURCE_PATH = SOURCE_DIR / TRAIT_FILENAME
 TRAIT_INPAINTED_PATH = INPAINTED_DIR / TRAIT_FILENAME
@@ -52,15 +59,16 @@ MAX_FILL_DISTANCE_KM = 250.0
 WINDOW_PADDING_DEG = 0.25
 
 COLOR_MIN = 0.0
-COLOR_MAX = 10.0
+COLOR_MAX = 6000.0
+COLORBAR_LABEL = "Leaf area (mean) [mm²]"
+COLORBAR_TICKS = np.arange(0, 6001, 1000)
 
 # Native-resolution DPI for this raster is ~2400, which makes the embedded
 # image inside the PDF ~150 MB. Cap it so the PDF stays a sensible size.
 MAX_EXPORT_DPI = 600
 
-BACKGROUND_COLOR = "#1a1a18"
 TRANSPARENT = BACKGROUND_COLOR
-LABEL_BOX_FACE = "#1a1a18"
+LABEL_BOX_FACE = BACKGROUND_COLOR
 LINE_COLOR = "#FFFFFF"
 CONNECTOR_COLOR = "#FFFFFF"
 MARKER_COLOR = "#ffffff"
@@ -356,7 +364,7 @@ def add_scalebar(ax, extent, color=LINE_COLOR):
         fontweight="normal",
         ha="left",
         va="bottom",
-        bbox=dict(facecolor=BACKGROUND_COLOR, edgecolor="none", alpha=0.88, pad=0.8),
+        bbox=dict(facecolor=BACKGROUND_COLOR, edgecolor="none", alpha=1.0, pad=0.8),
         zorder=10,
     )
 
@@ -382,7 +390,7 @@ def style_inset_axis(ax, name):
         fontweight="normal",
         fontfamily="sans-serif",
         path_effects=[pe.withStroke(linewidth=1.2, foreground=BACKGROUND_COLOR)],
-        bbox=dict(facecolor=BACKGROUND_COLOR, edgecolor="none", alpha=0.90, pad=2.0),
+        bbox=dict(facecolor=BACKGROUND_COLOR, edgecolor="none", alpha=1.0, pad=2.0),
         zorder=10,
     )
 
@@ -465,7 +473,7 @@ def main(batch_inpaint_others: bool = False):
     print(f"Plot source raster: {TRAIT_INPAINTED_PATH}")
     print(f"Global imputed pixels (display grid): {global_product['imputed_pixels']:,}")
     print(f"Export DPI for native main-map resolution: {export_dpi}")
-    print(f"Color scale: {vmin:.1f} to {vmax:.1f} m")
+    print(f"Color scale: {vmin:.1f} to {vmax:.1f}")
     for name, product in region_products.items():
         print(f"{name:12s} -> imputed {product['imputed_pixels']:,} pixels")
 
@@ -552,12 +560,12 @@ def main(batch_inpaint_others: bool = False):
     cbar.outline.set_edgecolor(LINE_COLOR)
     cbar.outline.set_linewidth(0.8)
     cbar.ax.tick_params(colors=TEXT_COLOR, labelsize=11, length=0)
-    cbar.set_ticks(np.arange(0, 11, 2))
-    cbar.set_label("Plant height (mean) [m]", color=TEXT_COLOR, fontsize=12, labelpad=8)
+    cbar.set_ticks(COLORBAR_TICKS)
+    cbar.set_label(COLORBAR_LABEL, color=TEXT_COLOR, fontsize=12, labelpad=8)
     cbar.ax.text(
         0.5,
         -2.45,
-        "Note: height is represented as the community-weighted mean, not maximum canopy height.",
+        f"Note: values above {int(COLOR_MAX):,} mm² are clipped to the maximum color.",
         transform=cbar.ax.transAxes,
         ha="center",
         va="top",

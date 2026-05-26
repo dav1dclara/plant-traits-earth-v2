@@ -24,10 +24,11 @@ jobs:
       run:
         working-directory: viewer
     env:
-      # Public Worker URL serving the DEM tiles (not secret).
-      # To change without editing this file, set a repo Variable of the same name
-      # and replace the value with: ${{ vars.VITE_DEM_PMTILES_URL }}
-      VITE_DEM_PMTILES_URL: https://ptev2-tiles.davidclara.workers.dev/dem/dem.pmtiles
+      # Public Worker URL serving the PMTiles archives (not secret). Only the
+      # origin is consumed by the viewer; per-trait paths are derived in code.
+      VITE_PMTILES_URL: https://ptev2-tiles.davidclara.workers.dev
+      # GitHub Project Pages serve at /<repo>/, so production assets need that base.
+      VITE_BASE_PATH: /plant-traits-earth-v2/
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
