@@ -5,39 +5,26 @@ Ward-cluster analysis in trait_correlation_analysis.ipynb.
 
 Design rationale
 ----------------
-Two findings from the analysis drive the architecture:
+All 37 traits are routed through the shared 8-expert MMoE. Each trait has
+its own gating network that learns which combination of experts to weight,
+allowing coherent trait groups to converge on shared experts while
+structurally unrelated traits route independently.
 
-1. Hard traits (X223, X282, X289, X297) have near-zero inter-trait correlation
-   AND near-zero EO predictability (test r ≈ 0). Routing them through the shared
-   MMoE pollutes the experts with unlearnable signal. They get a private bypass
-   path (ResidualBlock → head) with no cross-task routing.
-
-2. The remaining 33 traits are grouped into 8 Ward clusters (d = 1 − |r|,
-   cut-off 0.45). Two clusters are especially tight and benefit most from
-   the shared experts:
-     C2 Leaf size / mass  (X144, X145, X163, X3112, X3113, X3114, X55)  |r|=0.793
-     C4 Leaf structure    (X3117, X46, X50)                              |r|=0.749
-   One expert per Ward cluster (n_experts=8) gives the gating sufficient
-   capacity to specialise per functional group.
+The 8 experts correspond to the 8 Ward clusters (d = 1 − |r|):
+  C0  Leaf water & structural density : X3120, X4, X47, X6
+  C1  Plant size & life history       : X1080, X21, X237, X26, X27, X3106, X3107, X614, X95
+  C2  Leaf size & mass  (TIGHT)       : X144, X145, X163, X3112, X3113, X3114, X55   |r|=0.793
+  C3  Seed number & vascular anatomy  : X138, X169, X224, X281
+  C4  Leaf economics spectrum (TIGHT) : X3117, X46, X50                               |r|=0.749
+  C5  Leaf nutrient stoichiometry     : X13, X14, X146, X15, X78
+  C6  Wood anatomy lengths            : X282, X289
+  C7  Structurally unrelated residuals: X223, X297, X351
 
 Architecture
 ------------
-  SharedEncoder                        shared 4-block residual backbone
-  ├── DenseMMoELayer (8 experts)        routes the 33 soft traits
-  │     └── DeeperTaskHead × 33        per-trait prediction head
-  └── BypassBlock × 4 + Head × 4       private path for the 4 hard traits
-
-Ward clusters (trait_correlation_analysis.ipynb, 8-cluster Ward linkage)
--------------------------------------------------------------------------
-C0  Water / root mix          : X3120, X4, X47, X6
-C1  Size / propagule mix      : X1080, X21, X237, X26, X27, X3106, X3107, X614, X95
-C2  Leaf size / mass  (TIGHT) : X144, X145, X163, X3112, X3113, X3114, X55   |r|=0.793
-C3  Seed / conduit mix        : X138, X169, X224, X281
-C4  Leaf structure   (TIGHT)  : X3117, X46, X50                               |r|=0.749
-C5  Leaf chemistry            : X13, X14, X146, X15, X78
-C6  Wood-length pair          : X282, X289   (bypassed — hard EO targets)
-C7  Independent / hard        : X223, X297, X351
-     └─ X223, X282, X289, X297 → bypass   X351 → soft MMoE (lower priority)
+  SharedEncoder                     shared 4-block residual backbone
+  └── DenseMMoELayer (8 experts)    routes all 37 traits
+        └── DeeperTaskHead × 37    per-trait prediction head
 """
 
 from __future__ import annotations
@@ -47,16 +34,6 @@ from typing import Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# ---------------------------------------------------------------------------
-# Hard trait bypass indices  (0-based, in the 37-trait TRAIT_NAMES order)
-# X223=11, X282=17, X289=18, X297=19
-# ---------------------------------------------------------------------------
-_DEFAULT_HARD_INDICES: tuple[int, ...] = (11, 17, 18, 19)
-
-# ---------------------------------------------------------------------------
-# Low-level building blocks (self-contained, no external ptev2 dependencies)
-# ---------------------------------------------------------------------------
 
 
 def _make_norm(
@@ -131,11 +108,6 @@ class ResidualBlock(nn.Module):
         return self.act_out(out + identity)
 
 
-# ---------------------------------------------------------------------------
-# Higher-level blocks
-# ---------------------------------------------------------------------------
-
-
 class SharedEncoder(nn.Module):
     """Four-block residual encoder shared across all traits."""
 
@@ -177,13 +149,13 @@ class DenseMMoELayer(nn.Module):
     def __init__(
         self,
         in_features: int,
-        n_experts: int = 4,
+        n_experts: int = 8,
         expert_hidden: int = 96,
         n_tasks: int = 37,
         norm: Literal["bn", "gn", "none"] = "gn",
         gn_groups: int = 8,
         dropout_p: float = 0.0,
-        gate_temperature: float = 0.4,
+        gate_temperature: float = 0.8,
         gate_top_k: int | None = 2,
     ) -> None:
         super().__init__()
@@ -231,7 +203,7 @@ class DenseMMoELayer(nn.Module):
 
 
 class DeeperTaskHead(nn.Module):
-    """3×3 conv + 1×1 conv head."""
+    """3x3 conv + 1x1 conv head."""
 
     def __init__(
         self,
@@ -254,22 +226,19 @@ class DeeperTaskHead(nn.Module):
         return self.out(self.body(x))
 
 
-# ---------------------------------------------------------------------------
-# Main model
-# ---------------------------------------------------------------------------
-
-
 class GatedMMoEModelV3(nn.Module):
-    """Trait-grouped Gated MMoE with hard-trait bypass (analysis-motivated V3).
+    """Gated MMoE with all 37 traits routed through shared experts.
 
-    33 soft traits are routed through the 8-expert MMoE (one expert per Ward
-    cluster). 4 hard traits (X223, X282, X289, X297) bypass the MMoE and each
-    receive a private ResidualBlock + head — no cross-task routing.
+    All traits pass through the same 8-expert MMoE layer. Each trait has
+    its own gating network that learns which combination of experts to use.
+    Traits within coherent Ward clusters are expected to converge on similar
+    expert combinations; structurally unrelated traits (G7) route differently
+    without any explicit constraint.
 
     Args:
-        in_channels: total predictor channels (e.g. 150 for patch7_stride3).
-        out_channels: total traits to predict.
-        base_channels: encoder width; doubles each stage (48 → 96 → 192).
+        in_channels: total predictor channels (e.g. 150).
+        out_channels: total traits to predict (default 37).
+        base_channels: encoder width; doubles each stage (32 -> 64 -> 128).
         norm: normalisation type ('gn', 'bn', or 'none').
         gn_groups: groups for GroupNorm.
         stride_blocks: spatial stride per encoder block.
@@ -277,42 +246,28 @@ class GatedMMoEModelV3(nn.Module):
         n_experts: number of MMoE experts (default 8, one per Ward cluster).
         expert_hidden: channel width for experts and task heads.
         gate_temperature: softmax temperature (<1 sharpens, >1 flattens).
-        gate_top_k: active experts per soft trait (None = all).
-        residual_scale: if > 0, adds a scaled shared encoder projection to
-            every soft task map before the head.
-        hard_trait_indices: 0-based trait indices that bypass the MMoE.
-            Default: (11, 17, 18, 19) = X223, X282, X289, X297.
+        gate_top_k: active experts per trait per forward pass (None = all).
+        memory_efficient: if True, runs experts one at a time to save memory.
     """
 
     def __init__(
         self,
         in_channels: int,
         out_channels: int = 37,
-        base_channels: int = 48,
+        base_channels: int = 32,
         norm: Literal["bn", "gn", "none"] = "gn",
         gn_groups: int = 8,
         stride_blocks: tuple[int, int, int, int] = (1, 1, 1, 1),
         dropout_p: float = 0.1,
         n_experts: int = 8,
-        expert_hidden: int = 96,
+        expert_hidden: int = 64,
         gate_temperature: float = 0.8,
         gate_top_k: int | None = 2,
-        residual_scale: float = 0.0,
-        hard_trait_indices: tuple[int, ...] = _DEFAULT_HARD_INDICES,
         memory_efficient: bool = True,
     ) -> None:
         super().__init__()
-        self.residual_scale = float(residual_scale)
         self._out_channels = out_channels
         self.memory_efficient = bool(memory_efficient)
-
-        hard_set = set(hard_trait_indices)
-        self.hard_indices: list[int] = sorted(hard_set)
-        self.soft_indices: list[int] = [
-            i for i in range(out_channels) if i not in hard_set
-        ]
-        n_soft = len(self.soft_indices)
-        n_hard = len(self.hard_indices)
 
         self.encoder = SharedEncoder(
             in_channels, base_channels, norm, gn_groups, stride_blocks, dropout_p
@@ -324,7 +279,7 @@ class GatedMMoEModelV3(nn.Module):
             c3,
             n_experts=n_experts,
             expert_hidden=expert_hidden,
-            n_tasks=n_soft,
+            n_tasks=out_channels,
             norm=norm,
             gn_groups=gn_groups,
             dropout_p=dropout_p,
@@ -332,31 +287,10 @@ class GatedMMoEModelV3(nn.Module):
             gate_top_k=gate_top_k,
         )
 
-        if residual_scale > 0.0:
-            self.shared_proj = nn.Sequential(
-                nn.Conv2d(c3, expert_hidden, 1, bias=False),
-                _make_norm(norm, expert_hidden, gn_groups),
-                nn.PReLU(num_parameters=expert_hidden),
-            )
-        else:
-            self.shared_proj = None
-
-        self.soft_heads = nn.ModuleList(
+        self.heads = nn.ModuleList(
             [
                 DeeperTaskHead(expert_hidden, 1, norm, gn_groups, dropout_p)
-                for _ in range(n_soft)
-            ]
-        )
-        self.bypass_blocks = nn.ModuleList(
-            [
-                ResidualBlock(c3, expert_hidden, 1, norm, gn_groups, dropout_p)
-                for _ in range(n_hard)
-            ]
-        )
-        self.hard_heads = nn.ModuleList(
-            [
-                DeeperTaskHead(expert_hidden, 1, norm, gn_groups, dropout_p)
-                for _ in range(n_hard)
+                for _ in range(out_channels)
             ]
         )
 
@@ -364,44 +298,24 @@ class GatedMMoEModelV3(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.encoder(x)
-
         route = self.route_pool(z).flatten(1)
+
         if self.memory_efficient:
             gate_logits = torch.stack([g(route) for g in self.mmoe.gates], dim=1)
             gate_w = self.mmoe._gate_weights(gate_logits)
-            task_maps = None
-        else:
-            task_maps, gate_w = self.mmoe(z, route)
-        self.last_gate_weights = gate_w.detach()
+            self.last_gate_weights = gate_w.detach()
 
-        shared = self.shared_proj(z) if self.shared_proj is not None else None
-
-        soft_outs: list[torch.Tensor] = []
-        for i, head in enumerate(self.soft_heads):
-            if task_maps is None:
+            outputs = []
+            for i, head in enumerate(self.heads):
                 feat = None
                 for expert_idx, expert in enumerate(self.mmoe.experts):
                     expert_feat = expert(z)
-                    weighted = (
-                        gate_w[:, i, expert_idx].view(-1, 1, 1, 1) * expert_feat
-                    )
+                    weighted = gate_w[:, i, expert_idx].view(-1, 1, 1, 1) * expert_feat
                     feat = weighted if feat is None else feat + weighted
-                if feat is None:
-                    raise RuntimeError("MMoE has no experts.")
-            else:
-                feat = task_maps[:, i]
-            if shared is not None and self.residual_scale > 0.0:
-                feat = feat + self.residual_scale * shared
-            soft_outs.append(head(feat))
+                outputs.append(head(feat))
+        else:
+            task_maps, gate_w = self.mmoe(z, route)
+            self.last_gate_weights = gate_w.detach()
+            outputs = [self.heads[i](task_maps[:, i]) for i in range(self._out_channels)]
 
-        hard_outs: list[torch.Tensor] = [
-            head(block(z)) for block, head in zip(self.bypass_blocks, self.hard_heads)
-        ]
-
-        out: list[torch.Tensor | None] = [None] * self._out_channels
-        for i, idx in enumerate(self.soft_indices):
-            out[idx] = soft_outs[i]
-        for i, idx in enumerate(self.hard_indices):
-            out[idx] = hard_outs[i]
-
-        return torch.cat(out, dim=1)  # (B, T, H, W)
+        return torch.cat(outputs, dim=1)  # (B, T, H, W)
